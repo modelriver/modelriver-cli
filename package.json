@@ -1,0 +1,35 @@
+{
+  "name": "@modelriver/cli",
+  "version": "1.0.0",
+  "description": "ModelRiver CLI for testing webhooks and WebSockets from production",
+  "main": "src/index.js",
+  "bin": {
+    "modelriver": "./bin/modelriver"
+  },
+  "scripts": {
+    "start": "node bin/modelriver",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "modelriver",
+    "cli",
+    "webhook",
+    "websocket",
+    "testing"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^11.1.0",
+    "axios": "^1.6.0",
+    "ws": "^8.14.2",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
+
+
