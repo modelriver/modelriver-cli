@@ -46,37 +46,45 @@ Create a config file at `~/.modelriver/config.json` or `.modelriverrc` in your p
 
 ## Commands
 
-### `modelriver listen` - Forward Webhooks
+### `modelriver listen` - Receive Webhooks via WebSocket
 
-Forward webhooks from production to your local server.
+Like Stripe CLI, receive webhook events directly via WebSocket - no public URL needed.
 
 ```bash
-# Forward to local server
-modelriver listen --forward-to http://localhost:3001/webhook
+# Start listening for webhooks (like `stripe listen`)
+modelriver listen --print
 
-# Print webhook payloads to console
-modelriver listen --forward-to http://localhost:3001/webhook --print
+# Forward to local server
+modelriver listen --port 3001 --print
 
 # With custom API key
-modelriver listen --forward-to http://localhost:3001/webhook --api-key mr_live_YOUR_KEY
+modelriver listen --api-key mr_live_YOUR_KEY --print
 ```
 
-**Features:**
-- Creates a temporary webhook in your production project
-- Forwards all webhooks to your local endpoint
-- Verifies HMAC signatures automatically
-- Cleans up webhook on exit (Ctrl+C)
+**How it works (like Stripe CLI):**
+1. Authenticates with your API key
+2. Gets a secure WebSocket token (valid for 24 hours)
+3. Connects to ModelRiver via WebSocket
+4. Receives webhook events in real-time - no public URL or ngrok required!
+5. Optionally forwards to local server
 
 **Example Output:**
 ```
-✓ Setting up webhook forwarding...
-✓ Webhook forwarding active
+✓ Connecting to ModelRiver...
+✓ WebSocket connected
+✓ Joined webhook channel
 
-> Ready! ModelRiver webhook forwarding is active
-> Webhook ID: abc-123-def
-> Forwarding to: http://localhost:3001/webhook
+> Ready! Listening for webhook events
+> User ID: user-id-123
+> Channel: cli_webhooks:user-id-123
+> Local port: 3001
 
-> Press Ctrl+C to stop forwarding
+> Press Ctrl+C to stop
+
+[2026-01-07 15:20:30] Webhook received via WebSocket:
+  Channel ID: abc-123-def
+  Status: success
+  Data: {"result": "..."}
 ```
 
 ### `modelriver websocket` - Test WebSocket Connection
@@ -154,23 +162,6 @@ Channel Details
 > Or use "modelriver websocket" to connect and receive responses
 ```
 
-### `modelriver webhook create` - Create Webhook
-
-Create a new webhook in your project.
-
-```bash
-# Create webhook
-modelriver webhook create --url https://webhook.site/your-id
-
-# With description
-modelriver webhook create --url https://webhook.site/your-id --description "Production webhook"
-
-# With custom secret
-modelriver webhook create --url https://webhook.site/your-id --secret my-custom-secret
-```
-
-**Important**: Save the secret shown - it's only displayed once!
-
 ### `modelriver webhook list` - List Webhooks
 
 List all webhooks for your project.
@@ -205,15 +196,15 @@ modelriver webhook verify \
 
 ## Usage Examples
 
-### Example 1: Forward Webhooks to Local Server
+### Example 1: Listen for Webhooks (like Stripe CLI)
 
 ```bash
-# Terminal 1: Start webhook forwarding
+# Terminal 1: Start listening for webhooks via WebSocket
 export MODELRIVER_API_KEY=mr_live_YOUR_KEY
-modelriver listen --forward-to http://localhost:3001/webhook --print
+modelriver listen --print
 
-# Terminal 2: Send async request from production
-# Webhooks will appear in Terminal 1
+# Terminal 2: Trigger an async AI request
+# Webhook events will appear in Terminal 1 via WebSocket (no public URL needed!)
 ```
 
 ### Example 2: Test WebSocket Connection
@@ -228,15 +219,6 @@ modelriver websocket --workflow my-workflow --message "Hello from CLI" --verbose
 ```bash
 export MODELRIVER_API_KEY=mr_live_YOUR_KEY
 modelriver trigger --workflow my-workflow --message "Test" --print-channel
-```
-
-### Example 4: Create Webhook from CLI
-
-```bash
-export MODELRIVER_API_KEY=mr_live_YOUR_KEY
-modelriver webhook create \
-  --url https://webhook.site/your-unique-id \
-  --description "Production test webhook"
 ```
 
 ## Webhook Payload Format
@@ -282,9 +264,9 @@ Set the API key via:
 ### "WebSocket connection failed"
 
 - Verify the API URL is correct
-- Check that the `ws_token` hasn't expired (5-minute limit)
-- Ensure the token hasn't been used (one-time use)
+- Check that the `ws_token` hasn't expired (24-hour limit for CLI tokens)
 - Check network connectivity
+- If using production, ensure you're using `wss://` (secure WebSocket)
 
 ### "Webhook signature verification failed"
 
@@ -292,21 +274,18 @@ Set the API key via:
 - Verify timestamp is recent (within 5 minutes)
 - Check that payload structure matches expected format
 
-### "Failed to create webhook"
-
-- Verify the webhook URL is publicly accessible
-- Check that the URL is a valid HTTP/HTTPS endpoint
-- Ensure you have permission to create webhooks in the project
+**Note**: The CLI does not support creating permanent webhooks. Use the ModelRiver dashboard to create webhooks for production use. The CLI only creates temporary webhooks for testing (via `listen` and `test-webhook` commands), which are automatically cleaned up.
 
 ## API Endpoints
 
 The CLI uses these ModelRiver API endpoints:
 
-- `POST /api/v1/ai/async` - Create async request
-- `POST /api/v1/ai/reconnect` - Get reconnect token
-- `GET /api/v1/webhooks` - List webhooks
-- `POST /api/v1/webhooks` - Create webhook
-- `DELETE /api/v1/webhooks/:id` - Delete webhook
+- `POST /v1/ai/async` - Create async request (production)
+- `POST /api/v1/ai/async` - Create async request (dev/test)
+- `POST /v1/ai/reconnect` - Get reconnect token (production)
+- `POST /api/v1/ai/reconnect` - Get reconnect token (dev/test)
+- `GET /v1/webhooks` - List webhooks (production)
+- `GET /api/v1/webhooks` - List webhooks (dev/test)
 
 ## License
 

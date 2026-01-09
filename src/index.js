@@ -5,7 +5,7 @@ const { listenCommand } = require('./commands/listen');
 const { websocketCommand } = require('./commands/websocket');
 const { triggerCommand } = require('./commands/trigger');
 const { testWebhookCommand } = require('./commands/test-webhook');
-const { createWebhook, listWebhooks, verifyWebhook } = require('./commands/webhook');
+const { listWebhooks, verifyWebhook } = require('./commands/webhook');
 const config = require('./lib/config');
 
 const program = new Command();
@@ -24,9 +24,13 @@ program
 // Listen command
 program
   .command('listen')
-  .description('Forward webhooks from production to local server')
-  .requiredOption('-f, --forward-to <url>', 'Local server URL to forward webhooks')
+  .description('Forward webhooks from production to local server via WebSocket')
+  .option('-k, --api-key <key>', 'ModelRiver API key (or set MODELRIVER_API_KEY)')
+  .option('--api-url <url>', 'API base URL (default: https://api.modelriver.com)')
+  .option('-p, --port <port>', 'Local server port (default: 3001)')
+  .option('-f, --forward', 'Forward to external server (do not start internal server)')
   .option('--print', 'Print webhook payloads to console')
+  .option('-v, --verbose', 'Verbose output')
   .action((options) => {
     listenCommand({
       ...options,
@@ -92,21 +96,7 @@ program
 // Webhook commands
 const webhookCmd = program
   .command('webhook')
-  .description('Webhook management commands');
-
-webhookCmd
-  .command('create')
-  .description('Create a new webhook')
-  .requiredOption('-u, --url <url>', 'Webhook URL')
-  .option('-d, --description <text>', 'Description')
-  .option('-s, --secret <secret>', 'Custom secret (optional, auto-generated if not provided)')
-  .action((options) => {
-    createWebhook({
-      ...options,
-      apiKey: options.apiKey || program.opts().apiKey,
-      apiUrl: options.apiUrl || program.opts().apiUrl
-    });
-  });
+  .description('Webhook management commands (read-only and verification)');
 
 webhookCmd
   .command('list')

@@ -4,40 +4,6 @@ const WebhookVerifier = require('../lib/webhook-verifier');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
 
-async function createWebhook(options) {
-  const { url, description, secret, apiKey, apiUrl } = options;
-
-  if (!url) {
-    Logger.error('Error: --url is required');
-    process.exit(1);
-  }
-
-  try {
-    const apiClient = new ApiClient(apiKey, apiUrl);
-    const spinner = Logger.spinner('Creating webhook...');
-    spinner.start();
-
-    const webhookData = { url };
-    if (description) webhookData.description = description;
-    if (secret) webhookData.secret = secret;
-
-    const response = await apiClient.createWebhook(webhookData);
-
-    spinner.succeed('Webhook created');
-    Logger.success(`\n> Webhook ID: ${response.id}`);
-    Logger.success(`> URL: ${response.url}`);
-    Logger.warning(`> Secret: ${response.secret}`);
-    Logger.warning('> Save this secret - it won\'t be shown again!');
-
-  } catch (error) {
-    Logger.error(error.response?.data?.error || error.message);
-    if (error.response?.data?.details) {
-      Logger.error(`Details: ${error.response.data.details}`);
-    }
-    process.exit(1);
-  }
-}
-
 async function listWebhooks(options) {
   const { verbose, apiKey, apiUrl } = options;
 
@@ -128,7 +94,6 @@ async function verifyWebhook(options) {
 }
 
 module.exports = {
-  createWebhook,
   listWebhooks,
   verifyWebhook
 };

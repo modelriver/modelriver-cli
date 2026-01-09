@@ -10,6 +10,11 @@ class ApiClient {
       throw new Error('API key is required. Set MODELRIVER_API_KEY env var or use --api-key flag.');
     }
 
+    // Validate API key format
+    if (!this.apiKey.startsWith('mr_live_') && !this.apiKey.startsWith('mr_test_')) {
+      throw new Error('Invalid API key format. API keys must start with "mr_live_" or "mr_test_".');
+    }
+
     // Determine API path: /v1 in production (api.modelriver.com), /api/v1 in dev/test
     try {
       const apiUrlObj = new URL(this.apiUrl);
@@ -19,6 +24,12 @@ class ApiClient {
     } catch (e) {
       // Fallback to dev path if URL parsing fails
       this.apiPath = '/api/v1';
+    }
+
+    // Debug: Log API key info if DEBUG is set
+    if (process.env.DEBUG) {
+      console.log('[DEBUG] API Key (first 30 chars):', this.apiKey ? this.apiKey.substring(0, 30) + '...' : 'NOT SET');
+      console.log('[DEBUG] Authorization header will be:', this.apiKey ? `Bearer ${this.apiKey.substring(0, 30)}...` : 'NOT SET');
     }
 
     this.client = axios.create({
@@ -111,6 +122,49 @@ class ApiClient {
    */
   async deleteWebhook(webhookId) {
     await this.client.delete(`${this.apiPath}/webhooks/${webhookId}`);
+  }
+
+  /**
+   * Connect CLI and get WebSocket token
+   * @returns {Promise<object>} - {ws_token, websocket_url, project_id, user_id, channel}
+   */
+  async connectCLI() {
+    try {
+      const url = `${this.apiPath}/cli/connect`;
+      
+      // Debug: Log the request details
+      if (process.env.DEBUG || this.verbose) {
+        console.log('[DEBUG] Making request to:', `${this.apiUrl}${url}`);
+        console.log('[DEBUG] API Key (first 30 chars):', this.apiKey ? this.apiKey.substring(0, 30) + '...' : 'NOT SET');
+        console.log('[DEBUG] Authorization header:', this.apiKey ? `Bearer ${this.apiKey.substring(0, 30)}...` : 'NOT SET');
+      }
+
+      const response = await this.client.post(url, {});
+      
+      if (response.status >= 400) {
+        const errorMsg = response.data?.error || response.data?.message || `HTTP ${response.status}`;
+        const error = new Error(`Failed to connect CLI: ${errorMsg}`);
+        error.response = response;
+        throw error;
+      }
+
+      return response.data;
+    } catch (error) {
+      // Handle network errors or axios errors
+      if (error.response) {
+        // Server responded with error
+        const errorMsg = error.response.data?.error || error.response.data?.message || `HTTP ${error.response.status}`;
+        const newError = new Error(`Failed to connect CLI: ${errorMsg}`);
+        newError.response = error.response;
+        throw newError;
+      } else if (error.request) {
+        // Request was made but no response received
+        throw new Error(`Failed to connect CLI: No response from server. Is the backend running?`);
+      } else {
+        // Something else happened
+        throw new Error(`Failed to connect CLI: ${error.message}`);
+      }
+    }
   }
 }
 
