@@ -59,6 +59,9 @@ modelriver listen --port 3001 --print
 
 # With custom API key
 modelriver listen --api-key mr_live_YOUR_KEY --print
+
+# Forward to external server (without starting local server)
+modelriver listen --port 3002 --forward --print
 ```
 
 **How it works (like Stripe CLI):**
@@ -286,6 +289,23 @@ The CLI uses these ModelRiver API endpoints:
 - `POST /api/v1/ai/reconnect` - Get reconnect token (dev/test)
 - `GET /v1/webhooks` - List webhooks (production)
 - `GET /api/v1/webhooks` - List webhooks (dev/test)
+
+## Development
+
+### Running Tests
+
+The CLI includes a Jest test suite. To run the tests:
+
+```bash
+npm test
+```
+
+Tests cover critical components including:
+- Webhook signature verification
+- Configuration loading
+- API client validation
+- Output formatting
+
 
 ## License
 
