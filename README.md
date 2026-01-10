@@ -26,7 +26,6 @@ Set these environment variables for convenience:
 
 ```bash
 export MODELRIVER_API_KEY=mr_live_YOUR_API_KEY
-export MODELRIVER_PROJECT_ID=your-project-id
 export MODELRIVER_API_URL=https://api.modelriver.com  # Optional, defaults to production
 ```
 
@@ -37,7 +36,6 @@ Create a config file at `~/.modelriver/config.json` or `.modelriverrc` in your p
 ```json
 {
   "api_key": "mr_live_YOUR_API_KEY",
-  "project_id": "your-project-id",
   "api_url": "https://api.modelriver.com"
 }
 ```
