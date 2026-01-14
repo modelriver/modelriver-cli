@@ -1,10 +1,27 @@
+// Mock fs to prevent reading from actual ~/.modelriver/config.json
+jest.mock('fs', () => ({
+    existsSync: jest.fn(() => false),
+    readFileSync: jest.fn(() => '{}'),
+    writeFileSync: jest.fn(),
+    mkdirSync: jest.fn(),
+}));
+
 describe('ApiClient', () => {
     const originalEnv = process.env;
 
     beforeEach(() => {
         jest.resetModules();
+        // Re-apply the mock after resetModules
+        jest.doMock('fs', () => ({
+            existsSync: jest.fn(() => false),
+            readFileSync: jest.fn(() => '{}'),
+            writeFileSync: jest.fn(),
+            mkdirSync: jest.fn(),
+        }));
         process.env = { ...originalEnv };
-        // Set a valid API key for tests that need it
+        // Clear any config env vars first
+        delete process.env.MODELRIVER_API_KEY;
+        // Then set a valid API key for tests that need it
         process.env.MODELRIVER_API_KEY = 'mr_live_validtestkey123';
     });
 

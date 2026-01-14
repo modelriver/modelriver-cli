@@ -15,10 +15,21 @@
     "cli",
     "webhook",
     "websocket",
-    "testing"
+    "testing",
+    "ai",
+    "llm",
+    "api"
   ],
-  "author": "",
+  "author": "ModelRiver",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/modelriver/modelriver-cli.git"
+  },
+  "homepage": "https://modelriver.com",
+  "bugs": {
+    "url": "https://github.com/modelriver/modelriver-cli/issues"
+  },
   "dependencies": {
     "commander": "^11.1.0",
     "axios": "^1.6.0",
@@ -32,5 +43,10 @@
   },
   "engines": {
     "node": ">=16.0.0"
-  }
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ]
 }

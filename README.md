@@ -18,7 +18,60 @@ npm install
 npm link  # Makes `modelriver` command available globally
 ```
 
+## Quick Start
+
+### Step 1: Login (One-Time Setup)
+
+Run the interactive login command to configure your API key and forward URL:
+
+```bash
+modelriver login
+```
+
+You'll be prompted for:
+1. **API Key**: Your ModelRiver API key (starts with `mr_live_` or `mr_test_`)
+2. **Forward URL**: Where to forward webhooks (e.g., `http://localhost:4000`)
+
+The URL will be automatically normalized to include `/webhook/modelriver`.
+
+### Step 2: Start Forwarding
+
+After login, simply run:
+
+```bash
+modelriver forward
+```
+
+That's it! Webhooks will be forwarded to your configured URL.
+
+## Command Aliases
+
+For convenience, the CLI supports short aliases:
+
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `listen` | `l` | Listen for webhooks |
+| `forward` | `f` | Forward using saved config |
+| `trigger` | `t` | Send async request |
+| `websocket` | `ws` | Test WebSocket connection |
+| `test-webhook` | - | Test webhook delivery end-to-end |
+
+Example:
+```bash
+modelriver l --print   # Same as: modelriver listen --print
+modelriver f           # Same as: modelriver forward
+modelriver t -w my-workflow -m "Hello"  # Same as: modelriver trigger ...
+```
+
 ## Configuration
+
+### Interactive Setup (Recommended)
+
+```bash
+modelriver login
+```
+
+This saves your configuration to `~/.modelriver/config.json`.
 
 ### Environment Variables
 
@@ -36,13 +89,54 @@ Create a config file at `~/.modelriver/config.json` or `.modelriverrc` in your p
 ```json
 {
   "api_key": "mr_live_YOUR_API_KEY",
-  "api_url": "https://api.modelriver.com"
+  "api_url": "https://api.modelriver.com",
+  "forward_url": "http://localhost:4000/webhook/modelriver"
 }
 ```
 
 **Priority**: CLI arguments > Environment variables > Config file > Defaults
 
 ## Commands
+
+### `modelriver login` - Interactive Setup
+
+Configure your API key and forward URL interactively:
+
+```bash
+modelriver login
+```
+
+Example session:
+```
+ModelRiver CLI Login
+─────────────────────
+Configure your ModelRiver CLI credentials.
+
+Enter your ModelRiver API key: mr_live_abc123...
+Enter your webhook forward URL (e.g. http://localhost:4000/webhook/modelriver): http://localhost:4000
+
+✓ Configuration saved!
+
+Saved Configuration
+───────────────────
+✓ API Key: mr_live_abc123...
+✓ Forward URL: http://localhost:4000/webhook/modelriver
+```
+
+### `modelriver forward` - Quick Webhook Forwarding
+
+Forward webhooks using your saved configuration:
+
+```bash
+# Simple - uses saved config from login
+modelriver forward
+
+# Override port
+modelriver forward --port 4001
+
+# Verbose output
+modelriver forward --verbose
+```
 
 ### `modelriver listen` - Receive Webhooks via WebSocket
 
@@ -51,6 +145,7 @@ Like Stripe CLI, receive webhook events directly via WebSocket - no public URL n
 ```bash
 # Start listening for webhooks (like `stripe listen`)
 modelriver listen --print
+# Or use alias: modelriver l --print
 
 # Forward to local server
 modelriver listen --port 3001 --print
@@ -162,6 +257,33 @@ Channel Details
 > Use --webhook-url to automatically receive responses via webhook
 > Or use "modelriver websocket" to connect and receive responses
 ```
+
+### `modelriver test-webhook` - Test Webhook Delivery End-to-End
+
+Test the complete webhook flow - creates a webhook, makes an async request, and waits for the webhook response:
+
+```bash
+# Start local server and test webhook delivery
+modelriver test-webhook --workflow my-workflow --message "Test"
+
+# Use custom webhook URL (e.g., your local server or webhook.site)
+modelriver test-webhook --workflow my-workflow --message "Test" --webhook-url http://localhost:4000/webhook/modelriver
+
+# With custom secret and port
+modelriver test-webhook --workflow my-workflow --message "Test" --port 3002 --secret my-secret
+
+# Verbose output
+modelriver test-webhook --workflow my-workflow --message "Test" --verbose
+```
+
+**Options:**
+- `-w, --workflow <name>` - Workflow name (required)
+- `-m, --message <text>` - Test message
+- `-P, --payload <json>` - Custom JSON payload
+- `-u, --webhook-url <url>` - Webhook URL (starts local server on --port if not provided)
+- `-s, --secret <secret>` - Webhook secret (auto-generated if not provided)
+- `-p, --port <port>` - Local server port (default: 3001)
+- `-v, --verbose` - Verbose output
 
 ### `modelriver webhook list` - List Webhooks
 
@@ -281,12 +403,16 @@ Set the API key via:
 
 The CLI uses these ModelRiver API endpoints:
 
-- `POST /v1/ai/async` - Create async request (production)
-- `POST /api/v1/ai/async` - Create async request (dev/test)
-- `POST /v1/ai/reconnect` - Get reconnect token (production)
-- `POST /api/v1/ai/reconnect` - Get reconnect token (dev/test)
-- `GET /v1/webhooks` - List webhooks (production)
-- `GET /api/v1/webhooks` - List webhooks (dev/test)
+**Production** (`https://api.modelriver.com`):
+- `POST /v1/ai/async` - Create async AI request
+- `POST /v1/ai/reconnect` - Get reconnect token for existing channel
+- `GET /v1/webhooks` - List all webhooks
+- `POST /v1/webhooks` - Create a new webhook
+- `DELETE /v1/webhooks/:id` - Delete a webhook
+- `POST /v1/cli/connect` - Connect CLI and get WebSocket token
+
+**Development** (localhost or custom API URL):
+- Same endpoints but with `/api/v1` prefix instead of `/v1`
 
 ## Development
 

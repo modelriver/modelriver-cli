@@ -1,13 +1,31 @@
 // We need to test the Config class, but it's exported as a singleton instance.
 // We'll test the behavior through environment variables.
 
+// Mock fs to prevent reading from actual ~/.modelriver/config.json
+jest.mock('fs', () => ({
+    existsSync: jest.fn(() => false),
+    readFileSync: jest.fn(() => '{}'),
+    writeFileSync: jest.fn(),
+    mkdirSync: jest.fn(),
+}));
+
 describe('Config', () => {
     const originalEnv = process.env;
 
     beforeEach(() => {
         // Reset modules to get fresh Config instance
         jest.resetModules();
+        // Re-apply the mock after resetModules
+        jest.doMock('fs', () => ({
+            existsSync: jest.fn(() => false),
+            readFileSync: jest.fn(() => '{}'),
+            writeFileSync: jest.fn(),
+            mkdirSync: jest.fn(),
+        }));
         process.env = { ...originalEnv };
+        // Clear any config-related env vars
+        delete process.env.MODELRIVER_API_KEY;
+        delete process.env.MODELRIVER_API_URL;
     });
 
     afterAll(() => {

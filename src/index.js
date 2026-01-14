@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 const { Command } = require('commander');
+const { loginCommand } = require('./commands/login');
 const { listenCommand } = require('./commands/listen');
+const { forwardCommand } = require('./commands/forward');
 const { websocketCommand } = require('./commands/websocket');
 const { triggerCommand } = require('./commands/trigger');
 const { testWebhookCommand } = require('./commands/test-webhook');
@@ -21,9 +23,18 @@ program
   .option('--api-url <url>', 'API base URL (default: https://api.modelriver.com)')
   .option('-p, --project-id <id>', 'Project ID (or set MODELRIVER_PROJECT_ID)');
 
-// Listen command
+// Login command - interactive setup
+program
+  .command('login')
+  .description('Configure your ModelRiver API key and forward URL interactively')
+  .action((options) => {
+    loginCommand(options);
+  });
+
+// Listen command with alias 'l'
 program
   .command('listen')
+  .alias('l')
   .description('Forward webhooks from production to local server via WebSocket')
   .option('-k, --api-key <key>', 'ModelRiver API key (or set MODELRIVER_API_KEY)')
   .option('--api-url <url>', 'API base URL (default: https://api.modelriver.com)')
@@ -39,9 +50,21 @@ program
     });
   });
 
-// WebSocket command
+// Forward command with alias 'f' - simplified webhook forwarding
+program
+  .command('forward')
+  .alias('f')
+  .description('Forward webhooks using saved configuration (shortcut for listen --forward --print)')
+  .option('-p, --port <port>', 'Override target port')
+  .option('-v, --verbose', 'Verbose output')
+  .action((options) => {
+    forwardCommand(options);
+  });
+
+// WebSocket command with alias 'ws'
 program
   .command('websocket')
+  .alias('ws')
   .description('Test WebSocket connection to production')
   .option('-w, --workflow <name>', 'Workflow name')
   .option('-m, --message <text>', 'Test message')
@@ -76,9 +99,10 @@ program
     });
   });
 
-// Trigger command
+// Trigger command with alias 't'
 program
   .command('trigger')
+  .alias('t')
   .description('Send test async request')
   .option('-w, --workflow <name>', 'Workflow name')
   .option('-m, --message <text>', 'Test message')
