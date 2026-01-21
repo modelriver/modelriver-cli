@@ -12,10 +12,12 @@ const config = require('./lib/config');
 
 const program = new Command();
 
+const { version } = require('../package.json');
+
 program
   .name('modelriver')
   .description('ModelRiver CLI for testing webhooks and WebSockets from production')
-  .version('1.1.0');
+  .version(version);
 
 // Global options
 program
