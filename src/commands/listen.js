@@ -4,9 +4,10 @@ const CLIWebSocketClient = require('../lib/cli-websocket-client');
 const WebhookVerifier = require('../lib/webhook-verifier');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
+const { parseForwardUrl } = require('../utils/url-helpers');
 
 async function listenCommand(options) {
-  let { apiKey, apiUrl, print, port, verbose, forward } = options;
+  let { apiKey, apiUrl, print, port, verbose, forward, forwardUrl } = options;
   const forwardOnly = forward === true;
 
   const spinner = Logger.spinner('Setting up webhook forwarding...');
@@ -206,16 +207,25 @@ async function listenCommand(options) {
 
       // Forward to local server
       const http = require('http');
+      const https = require('https');
       const postData = JSON.stringify({
         channel_id,
         timestamp,
         data
       });
 
-      const options = {
+      // Parse the forward URL or use localhost defaults
+      const parsedUrl = parseForwardUrl(forwardUrl) || {
         hostname: 'localhost',
         port: localPort,
-        path: '/webhook',
+        path: '/webhook/modelriver',
+        protocol: 'http'
+      };
+
+      const options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port,
+        path: parsedUrl.path,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -226,15 +236,19 @@ async function listenCommand(options) {
         }
       };
 
-      const req = http.request(options, (res) => {
+      // Use https or http based on protocol
+      const requestModule = parsedUrl.protocol === 'https' ? https : http;
+      const targetUrl = `${parsedUrl.protocol}://${parsedUrl.hostname}:${parsedUrl.port}${parsedUrl.path}`;
+
+      const req = requestModule.request(options, (res) => {
         // Webhook forwarded successfully
         if (print) {
-          Logger.info(`  → Forwarded to local server (status: ${res.statusCode})`);
+          Logger.info(`  → Forwarded to ${targetUrl} (status: ${res.statusCode})`);
         }
       });
 
       req.on('error', (error) => {
-        Logger.error(`Failed to forward webhook to local server: ${error.message}`);
+        Logger.error(`Failed to forward webhook to ${targetUrl}: ${error.message}`);
       });
 
       req.write(postData);

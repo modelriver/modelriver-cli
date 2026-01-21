@@ -91,8 +91,29 @@ function isValidApiKeyFormat(apiKey) {
     return apiKey.startsWith('mr_live_') || apiKey.startsWith('mr_test_');
 }
 
+/**
+ * Parse a forward URL into its components
+ * @param {string} url - The URL to parse
+ * @returns {object|null} - Object with hostname, port, path, protocol or null if invalid
+ */
+function parseForwardUrl(url) {
+    if (!url) return null;
+    try {
+        const urlObj = new URL(url);
+        return {
+            hostname: urlObj.hostname,
+            port: parseInt(urlObj.port, 10) || (urlObj.protocol === 'https:' ? 443 : 80),
+            path: urlObj.pathname || '/webhook/modelriver',
+            protocol: urlObj.protocol.replace(':', '')
+        };
+    } catch (error) {
+        return null;
+    }
+}
+
 module.exports = {
     normalizeWebhookUrl,
     extractPort,
-    isValidApiKeyFormat
+    isValidApiKeyFormat,
+    parseForwardUrl
 };

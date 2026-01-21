@@ -15,7 +15,7 @@ const program = new Command();
 program
   .name('modelriver')
   .description('ModelRiver CLI for testing webhooks and WebSockets from production')
-  .version('1.0.0');
+  .version('1.1.0');
 
 // Global options
 program

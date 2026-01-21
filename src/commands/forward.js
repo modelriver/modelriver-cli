@@ -52,6 +52,7 @@ async function forwardCommand(options) {
         apiKey,
         apiUrl: config.getApiUrl(),
         port: targetPort,
+        forwardUrl: forwardUrl,
         forward: true,
         print: true,
         verbose
