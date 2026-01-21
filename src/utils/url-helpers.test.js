@@ -126,9 +126,19 @@ describe('URL Helpers', () => {
             expect(parseForwardUrl(undefined)).toBeNull();
         });
 
+        it('should handle URLs without protocol by defaulting to http', () => {
+            const result = parseForwardUrl('myserver:4000/webhook/modelriver');
+            expect(result).toEqual({
+                hostname: 'myserver',
+                port: 4000,
+                path: '/webhook/modelriver',
+                protocol: 'http'
+            });
+        });
+
         it('should return null for invalid URLs', () => {
-            expect(parseForwardUrl('not-a-url')).toBeNull();
-            expect(parseForwardUrl('just-text')).toBeNull();
+            expect(parseForwardUrl('http://invalid url with spaces')).toBeNull();
+            expect(parseForwardUrl('just text with spaces')).toBeNull();
         });
     });
 });

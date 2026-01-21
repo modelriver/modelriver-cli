@@ -1,6 +1,6 @@
 {
   "name": "@modelriver/cli",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "ModelRiver CLI for testing webhooks and WebSockets from production",
   "main": "src/index.js",
   "bin": {

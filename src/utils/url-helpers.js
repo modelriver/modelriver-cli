@@ -10,6 +10,11 @@
 function normalizeWebhookUrl(url) {
     if (!url) return url;
 
+    // Ensure protocol
+    if (!url.match(/^https?:\/\//)) {
+        url = 'http://' + url;
+    }
+
     try {
         const urlObj = new URL(url);
         let pathname = urlObj.pathname;
@@ -98,6 +103,12 @@ function isValidApiKeyFormat(apiKey) {
  */
 function parseForwardUrl(url) {
     if (!url) return null;
+
+    // Ensure protocol
+    if (!url.match(/^https?:\/\//)) {
+        url = 'http://' + url;
+    }
+
     try {
         const urlObj = new URL(url);
         return {
