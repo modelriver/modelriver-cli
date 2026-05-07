@@ -1,10 +1,10 @@
 {
   "name": "@modelriver/cli",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "ModelRiver CLI for testing webhooks and WebSockets from production",
   "main": "src/index.js",
   "bin": {
-    "modelriver": "./bin/modelriver"
+    "modelriver": "bin/modelriver"
   },
   "scripts": {
     "start": "node bin/modelriver",
@@ -24,19 +24,19 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/modelriver/modelriver-cli.git"
+    "url": "git+https://github.com/modelriver/modelriver-cli.git"
   },
   "homepage": "https://modelriver.com",
   "bugs": {
     "url": "https://github.com/modelriver/modelriver-cli/issues"
   },
   "dependencies": {
-    "commander": "^11.1.0",
-    "axios": "^1.6.0",
-    "ws": "^8.14.2",
+    "axios": "^1.16.0",
     "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "express": "^4.22.1",
     "ora": "^5.4.1",
-    "express": "^4.18.2"
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "jest": "^29.7.0"
