@@ -5,6 +5,10 @@ const WebhookVerifier = require('../lib/webhook-verifier');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
 const { parseForwardUrl } = require('../utils/url-helpers');
+const {
+  printWebhookDetails,
+  resolveCallbackUrl,
+} = require('../utils/webhook-payload');
 
 async function listenCommand(options) {
   let { apiKey, apiUrl, print, port, verbose, forward, forwardUrl } = options;
@@ -68,7 +72,7 @@ async function listenCommand(options) {
 
     // Debug: Show API key info if verbose
     if (verbose) {
-      Logger.info(`> API URL: ${apiUrl}`);
+      Logger.info(`> API URL: ${apiClient.apiUrl}`);
       Logger.info(`> API Path: ${apiClient.apiPath}`);
       Logger.info(`> API Key (first 30 chars): ${apiKey.substring(0, 30)}...`);
     }
@@ -152,20 +156,27 @@ async function listenCommand(options) {
           );
         }
 
-        if (print) {
-          const timestampStr = Formatter.timestamp(new Date());
-          Logger.log(`\n[${timestampStr}] Webhook received:`);
-          Logger.log(`  Channel ID: ${channel_id || 'N/A'}`);
-          Logger.log(`  Status: ${data?.status || 'N/A'}`);
-          if (isValid !== null) {
-            Logger.log(`  Signature: ${isValid ? '✓ Valid' : '✗ Invalid'}`);
-          }
-          if (data?.data) {
-            Logger.log(`  Data: ${Formatter.json(data.data)}`);
-          }
-          if (data?.meta) {
-            Logger.log(`  Meta: ${Formatter.json(data.meta)}`);
-          }
+        // Skip printing when this request came from our own WebSocket forwarder
+        // (already printed in the WebSocket handler). Still print external POSTs.
+        const isInternalForward = req.headers['x-modelriver-cli-internal'] === '1';
+        if (print && !isInternalForward) {
+          printWebhookDetails(
+            {
+              channel_id,
+              data,
+              callback_url: req.body.callback_url || resolveCallbackUrl(req.body),
+            },
+            {
+              Logger,
+              Formatter,
+              WebhookVerifier,
+              webhookSecret,
+              signature,
+              timestamp: payloadTimestamp || timestamp,
+              apiKey,
+              label: 'Webhook received (local server)',
+            }
+          );
         }
 
         // Always return 200 to acknowledge receipt
@@ -174,6 +185,25 @@ async function listenCommand(options) {
 
       server = app.listen(localPort, 'localhost', () => {
         Logger.success(`> Local server listening on http://localhost:${localPort}/webhook`);
+      });
+
+      server.on('error', (error) => {
+        if (error.code === 'EADDRINUSE') {
+          spinner.fail(`Port ${localPort} is already in use`);
+          Logger.error(`Another process is listening on port ${localPort}.`);
+          Logger.warning(`> Use a different port: modelriver listen --print --port ${Number(localPort) + 1}`);
+          Logger.warning('> Or stop the other process and try again');
+          if (wsClient) {
+            wsClient.close();
+          }
+          process.exit(1);
+        }
+
+        Logger.error(`Local server error: ${error.message}`);
+        if (wsClient) {
+          wsClient.close();
+        }
+        process.exit(1);
       });
     } else {
       Logger.success(`> Forwarding webhooks to http://localhost:${localPort}/webhook`);
@@ -184,25 +214,16 @@ async function listenCommand(options) {
       const { channel_id, timestamp, data, signature } = webhookPayload;
 
       if (print) {
-        const timestampStr = Formatter.timestamp(new Date());
-        Logger.log(`\n[${timestampStr}] Webhook received via WebSocket:`);
-        Logger.log(`  Channel ID: ${channel_id || 'N/A'}`);
-        Logger.log(`  Status: ${data?.status || 'N/A'}`);
-        if (signature && webhookSecret) {
-          const isValid = WebhookVerifier.verify(
-            signature,
-            data,
-            webhookSecret,
-            timestamp.toString()
-          );
-          Logger.log(`  Signature: ${isValid ? '✓ Valid' : '✗ Invalid'}`);
-        }
-        if (data?.data) {
-          Logger.log(`  Data: ${Formatter.json(data.data)}`);
-        }
-        if (data?.meta) {
-          Logger.log(`  Meta: ${Formatter.json(data.meta)}`);
-        }
+        printWebhookDetails(webhookPayload, {
+          Logger,
+          Formatter,
+          WebhookVerifier,
+          webhookSecret,
+          signature,
+          timestamp,
+          apiKey,
+          label: 'Webhook received via WebSocket',
+        });
       }
 
       // Forward to local server
@@ -211,7 +232,8 @@ async function listenCommand(options) {
       const postData = JSON.stringify({
         channel_id,
         timestamp,
-        data
+        callback_url: resolveCallbackUrl(webhookPayload),
+        data,
       });
 
       // Parse the forward URL or use localhost defaults
@@ -232,7 +254,8 @@ async function listenCommand(options) {
           'Content-Length': Buffer.byteLength(postData),
           'X-ModelRiver-Signature': signature || '',
           'X-ModelRiver-Timestamp': timestamp.toString(),
-          'X-ModelRiver-Webhook-Id': webhookPayload.webhook_id || ''
+          'X-ModelRiver-Webhook-Id': webhookPayload.webhook_id || '',
+          'X-ModelRiver-CLI-Internal': '1',
         }
       };
 

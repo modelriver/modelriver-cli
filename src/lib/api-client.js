@@ -1,6 +1,13 @@
 const axios = require('axios');
 const config = require('./config');
 
+function createAuthHeaders(apiKey) {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
+}
+
 class ApiClient {
   constructor(apiKey = null, apiUrl = null) {
     this.apiKey = apiKey || config.getApiKey();
@@ -165,6 +172,21 @@ class ApiClient {
         throw new Error(`Failed to connect CLI: ${error.message}`);
       }
     }
+  }
+
+  /**
+   * Send an event-driven callback to complete a pending channel.
+   * @param {string} callbackUrl - Full callback URL from webhook payload
+   * @param {object} body - Callback payload { data?, task_id?, metadata? }
+   * @returns {Promise<object>} - Axios-like response { status, data }
+   */
+  async sendCallback(callbackUrl, body) {
+    const response = await axios.post(callbackUrl, body, {
+      headers: createAuthHeaders(this.apiKey),
+      validateStatus: (status) => status < 500,
+    });
+
+    return response;
   }
 }
 

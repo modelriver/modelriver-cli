@@ -3,6 +3,11 @@ const WebSocketClient = require('../lib/websocket-client');
 const config = require('../lib/config');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
+const {
+  buildCallbackHint,
+  isFinalWebSocketStatus,
+  isIntermediateWebSocketStatus,
+} = require('../utils/webhook-payload');
 
 /**
  * Normalize WebSocket URL for production environments
@@ -74,9 +79,20 @@ async function websocketCommand(options) {
             messages: [{ role: 'user', content: message || 'Test from CLI' }]
           };
 
+        // Allow --workflow with --payload when payload omits workflow
+        if (workflow && !requestPayload.workflow) {
+          requestPayload.workflow = workflow;
+        }
+
+        if (!requestPayload.workflow) {
+          spinner.fail('Workflow required');
+          Logger.error('Provide --workflow or include "workflow" in --payload JSON');
+          process.exit(1);
+        }
+
         if (verbose) {
           Logger.info(`\n> API URL: ${apiClient.apiUrl}`);
-          Logger.info(`> Workflow: ${workflow}`);
+          Logger.info(`> Workflow: ${requestPayload.workflow}`);
           Logger.info(`> Payload: ${JSON.stringify(requestPayload, null, 2)}`);
         }
 
@@ -194,21 +210,59 @@ async function websocketCommand(options) {
 
       // Set up response listener BEFORE waiting (to catch responses that arrive quickly)
       let responseReceived = false;
-      
+      let sawIntermediateEvent = false;
+
       // Timeout after 5 minutes
       const timeoutId = setTimeout(() => {
         if (!responseReceived) {
           Logger.error('\n❌ Timeout: No response received after 5 minutes');
-          Logger.error('   Possible causes:');
-          Logger.error('   1. Workflow is still processing (try waiting longer)');
-          Logger.error('   2. Workflow failed on the server (check server logs)');
-          Logger.error('   3. Server did not broadcast the response');
+          if (sawIntermediateEvent) {
+            Logger.error('   Event-driven flow is waiting for a backend callback.');
+            Logger.error(`   Complete it with: modelriver callback --channel-id ${channelIdToUse} --data '{"summary":"..."}'`);
+          } else {
+            Logger.error('   Possible causes:');
+            Logger.error('   1. Workflow is still processing (try waiting longer)');
+            Logger.error('   2. Workflow failed on the server (check server logs)');
+            Logger.error('   3. Server did not broadcast the response');
+          }
           wsClient.close();
           process.exit(1);
         }
       }, 5 * 60 * 1000);
 
       wsClient.onResponse((payload) => {
+        const status = payload?.status;
+
+        if (isIntermediateWebSocketStatus(status)) {
+          sawIntermediateEvent = true;
+          Logger.warning(`\n⏳ Event-driven update (${status})`);
+          Logger.info(`> Channel ID: ${payload.channel_id || channelIdToUse}`);
+          if (payload.event_name) {
+            Logger.info(`> Event: ${payload.event_name}`);
+          }
+          if (payload.message) {
+            Logger.info(`> Message: ${payload.message}`);
+          }
+
+          const callbackUrl = `${apiClient.apiUrl}${apiClient.apiPath}/callback/${channelIdToUse}`;
+          const hint = buildCallbackHint(callbackUrl, channelIdToUse, apiClient.apiKey);
+          if (hint) {
+            Logger.warning(`\n${hint}\n`);
+          }
+
+          if (verbose) {
+            Logger.info(`Intermediate payload: ${Formatter.json(payload)}`);
+          }
+          return;
+        }
+
+        if (!isFinalWebSocketStatus(status) && status) {
+          if (verbose) {
+            Logger.info(`Received non-final status "${status}", waiting for completion...`);
+          }
+          return;
+        }
+
         responseReceived = true;
         clearTimeout(timeoutId);
         Logger.success('\n✅ Response received:\n');

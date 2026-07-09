@@ -23,6 +23,17 @@ async function triggerCommand(options) {
           messages: [{ role: 'user', content: message || 'Test from CLI' }]
         };
 
+    // Allow --workflow with --payload when payload omits workflow
+    if (workflow && !requestPayload.workflow) {
+      requestPayload.workflow = workflow;
+    }
+
+    if (!requestPayload.workflow) {
+      spinner.fail('Workflow required');
+      Logger.error('Provide --workflow or include "workflow" in --payload JSON');
+      process.exit(1);
+    }
+
     const response = await apiClient.createAsyncRequest(requestPayload);
 
     spinner.succeed('Async request created');
@@ -61,6 +72,7 @@ async function triggerCommand(options) {
     } else {
       Logger.info('\n> Use --webhook-url to automatically receive responses via webhook');
       Logger.info('> Or use "modelriver websocket" to connect and receive responses');
+      Logger.info('> For event-driven workflows, complete with: modelriver callback --channel-id <id> --data \'{...}\'');
     }
 
   } catch (error) {

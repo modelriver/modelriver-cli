@@ -1,10 +1,18 @@
 # Test files
 **/*.test.js
 *.test.js
+test/
+**/__tests__/
+
+# Internal docs (not for npm consumers)
+INTEGRATION_TEST.md
+TESTING.md
+TEST_CASES.md
 
 # Dev files
 .git
 .gitignore
+.github
 
 # Editor/IDE
 .vscode
@@ -15,3 +23,7 @@
 # OS files
 .DS_Store
 Thumbs.db
+
+# Build artifacts
+*.tgz
+node_modules/

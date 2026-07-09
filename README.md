@@ -54,6 +54,7 @@ For convenience, the CLI supports short aliases:
 | `forward` | `f` | Forward using saved config |
 | `trigger` | `t` | Send async request |
 | `websocket` | `ws` | Test WebSocket connection |
+| `callback` | - | Complete event-driven callback |
 | `test-webhook` | - | Test webhook delivery end-to-end |
 
 Example:
@@ -183,6 +184,38 @@ modelriver listen --port 3002 --forward --print
   Data: {"result": "..."}
 ```
 
+**Event-driven example:**
+```
+[timestamp] Webhook received via WebSocket:
+  Channel ID: abc-123-def
+  Status: ai_generated (callback required)
+  Type: task.ai_generated
+  Event: schema_result_ready
+  Callback URL: https://api.modelriver.com/v1/callback/abc-123-def
+  Customer data: { "ticket_id": "TCK-10042" }
+  AI response: { ... }
+
+> Event-driven webhook — complete the flow with a callback:
+>   modelriver callback --channel-id abc-123-def --data '{"summary":"..."}'
+```
+
+### `modelriver callback` - Complete Event-driven Flows
+
+After `listen` receives a `task.ai_generated` webhook, complete the flow:
+
+```bash
+# Using channel ID
+modelriver callback \
+  --channel-id abc-123-def \
+  --data '{"summary":"Escalated to auth","priority":"high"}' \
+  --task-id TCK-10042
+
+# Using full callback URL from the webhook
+modelriver callback \
+  --callback-url "https://api.modelriver.com/v1/callback/abc-123-def" \
+  --data '{"summary":"Escalated to auth"}'
+```
+
 ### `modelriver websocket` - Test WebSocket Connection
 
 Test WebSocket connections to production and receive real-time responses.
@@ -231,14 +264,25 @@ Send a test async request and get channel details.
 # Basic trigger
 modelriver trigger --workflow my-workflow --message "Test message"
 
-# With custom payload
-modelriver trigger --workflow my-workflow --payload '{"messages": [...]}'
+# With custom payload (workflow can be in --payload or via --workflow)
+modelriver trigger --workflow my-workflow --payload '{"messages": [...], "metadata": {"ticket_id":"TCK-1"}}'
 
 # Create webhook to receive response
 modelriver trigger --workflow my-workflow --message "Test" --webhook-url https://webhook.site/your-id
 
 # Print channel details
 modelriver trigger --workflow my-workflow --message "Test" --print-channel
+```
+
+For **event-driven** workflows, after triggering:
+
+```bash
+# Terminal 1
+modelriver listen --print
+
+# Terminal 2
+modelriver trigger --workflow my-event-workflow --message "Test" --print-channel
+modelriver callback --channel-id CHANNEL_ID --data '{"enriched":true}'
 ```
 
 **Example Output:**
@@ -344,6 +388,23 @@ export MODELRIVER_API_KEY=mr_live_YOUR_KEY
 modelriver trigger --workflow my-workflow --message "Test" --print-channel
 ```
 
+### Example 4: Event-driven Workflow End-to-End
+
+```bash
+# Terminal 1: Listen for webhooks
+export MODELRIVER_API_KEY=mr_live_YOUR_KEY
+modelriver listen --print
+
+# Terminal 2: Trigger + callback
+modelriver trigger \
+  --workflow my-event-workflow \
+  --payload '{"messages":[{"role":"user","content":"Test"}],"metadata":{"ticket_id":"TCK-1"}}' \
+  --print-channel
+
+# After Terminal 1 shows task.ai_generated:
+modelriver callback --channel-id CHANNEL_ID --data '{"summary":"Done"}'
+```
+
 ## Webhook Payload Format
 
 Webhooks are sent as HTTP POST requests with the following format:
@@ -410,6 +471,7 @@ The CLI uses these ModelRiver API endpoints:
 - `POST /v1/webhooks` - Create a new webhook
 - `DELETE /v1/webhooks/:id` - Delete a webhook
 - `POST /v1/cli/connect` - Connect CLI and get WebSocket token
+- `POST /v1/callback/:channel_id` - Complete event-driven callback
 
 **Development** (localhost or custom API URL):
 - Same endpoints but with `/api/v1` prefix instead of `/v1`
@@ -429,6 +491,7 @@ Tests cover critical components including:
 - Configuration loading
 - API client validation
 - Output formatting
+- Event-driven webhook payload helpers
 
 
 ## License

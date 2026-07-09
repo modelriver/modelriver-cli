@@ -6,6 +6,7 @@ const { listenCommand } = require('./commands/listen');
 const { forwardCommand } = require('./commands/forward');
 const { websocketCommand } = require('./commands/websocket');
 const { triggerCommand } = require('./commands/trigger');
+const { callbackCommand } = require('./commands/callback');
 const { testWebhookCommand } = require('./commands/test-webhook');
 const { listWebhooks, verifyWebhook } = require('./commands/webhook');
 const config = require('./lib/config');
@@ -48,7 +49,7 @@ program
     listenCommand({
       ...options,
       apiKey: options.apiKey || program.opts().apiKey,
-      apiUrl: options.apiUrl || program.opts().apiUrl
+      apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl(),
     });
   });
 
@@ -77,8 +78,26 @@ program
     websocketCommand({
       ...options,
       apiKey: options.apiKey || program.opts().apiKey,
-      apiUrl: options.apiUrl || program.opts().apiUrl,
+      apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl(),
       projectId: options.projectId || program.opts().projectId
+    });
+  });
+
+// Callback command - complete event-driven flows
+program
+  .command('callback')
+  .description('Send an event-driven callback to complete a pending channel')
+  .option('-c, --channel-id <id>', 'Channel ID from trigger/listen output')
+  .option('--callback-url <url>', 'Full callback URL from webhook payload')
+  .option('-d, --data <json>', 'Callback data object JSON')
+  .option('-P, --payload <json>', 'Full callback payload JSON')
+  .option('--task-id <id>', 'Optional task ID')
+  .option('--metadata <json>', 'Optional metadata object JSON')
+  .action((options) => {
+    callbackCommand({
+      ...options,
+      apiKey: options.apiKey || program.opts().apiKey,
+      apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl(),
     });
   });
 
@@ -97,7 +116,7 @@ program
     testWebhookCommand({
       ...options,
       apiKey: options.apiKey || program.opts().apiKey,
-      apiUrl: options.apiUrl || program.opts().apiUrl
+      apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl(),
     });
   });
 
@@ -115,7 +134,7 @@ program
     triggerCommand({
       ...options,
       apiKey: options.apiKey || program.opts().apiKey,
-      apiUrl: options.apiUrl || program.opts().apiUrl
+      apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl()
     });
   });
 
@@ -132,7 +151,7 @@ webhookCmd
     listWebhooks({
       ...options,
       apiKey: options.apiKey || program.opts().apiKey,
-      apiUrl: options.apiUrl || program.opts().apiUrl
+      apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl(),
     });
   });
 
