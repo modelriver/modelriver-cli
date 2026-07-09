@@ -114,10 +114,11 @@ async function loginCommand(options) {
         }
 
         // Prompt for forward URL
-        const defaultForwardUrl = currentForwardUrl || 'http://localhost:4000';
+        // Default to the CLI local receiver port (3001), not ModelRiver API (4000).
+        const defaultForwardUrl = currentForwardUrl || 'http://localhost:3001/webhook/modelriver';
         let forwardUrl = await prompt(
             rl,
-            'Enter your webhook forward URL (e.g. http://localhost:4000/webhook/modelriver)',
+            'Enter your webhook forward URL (e.g. http://localhost:3001/webhook/modelriver)',
             defaultForwardUrl,
             false, // maskDefault
             false  // showDefault - Hide the (http://...) bracket as requested

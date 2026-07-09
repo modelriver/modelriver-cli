@@ -30,9 +30,10 @@ modelriver login
 
 You'll be prompted for:
 1. **API Key**: Your ModelRiver API key (starts with `mr_live_` or `mr_test_`)
-2. **Forward URL**: Where to forward webhooks (e.g., `http://localhost:4000`)
+2. **Forward URL**: Where to forward webhooks on your machine (e.g., `http://localhost:3001/webhook/modelriver`)
 
-The URL will be automatically normalized to include `/webhook/modelriver`.
+This is your local webhook receiver (CLI default port **3001**), not the ModelRiver API port (**4000**).
+The URL will be automatically normalized to include `/webhook/modelriver` if needed.
 
 ### Step 2: Start Forwarding
 
@@ -91,7 +92,7 @@ Create a config file at `~/.modelriver/config.json` or `.modelriverrc` in your p
 {
   "api_key": "mr_live_YOUR_API_KEY",
   "api_url": "https://api.modelriver.com",
-  "forward_url": "http://localhost:4000/webhook/modelriver"
+  "forward_url": "http://localhost:3001/webhook/modelriver"
 }
 ```
 
@@ -114,14 +115,14 @@ ModelRiver CLI Login
 Configure your ModelRiver CLI credentials.
 
 Enter your ModelRiver API key: mr_live_abc123...
-Enter your webhook forward URL (e.g. http://localhost:4000/webhook/modelriver): http://localhost:4000
+Enter your webhook forward URL (e.g. http://localhost:3001/webhook/modelriver): http://localhost:3001/webhook/modelriver
 
 ✓ Configuration saved!
 
 Saved Configuration
 ───────────────────
 ✓ API Key: mr_live_abc123...
-✓ Forward URL: http://localhost:4000/webhook/modelriver
+✓ Forward URL: http://localhost:3001/webhook/modelriver
 ```
 
 ### `modelriver forward` - Quick Webhook Forwarding
