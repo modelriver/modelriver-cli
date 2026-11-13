@@ -136,6 +136,16 @@ async function toolsCommand(options) {
     });
     await wsClient.connect();
 
+    // Subscribe before joining: the server may send a tool_call right behind
+    // the join reply, and it would be lost if nobody listened yet. Only calls
+    // on this session's topic are handled.
+    wsClient.on('tool_call', (call, callTopic) => {
+      if (callTopic !== topic) return;
+      handleToolCall(call, { wsClient, topic, origin: target.origin, print }).catch((error) => {
+        Logger.error(`Tool call failed: ${error.message}`);
+      });
+    });
+
     spinner.text = 'Joining tool channel...';
     // join() keeps the params, so a rejoin after a reconnect sends them again.
     await wsClient.join(topic, joinParams);
@@ -151,12 +161,6 @@ async function toolsCommand(options) {
     Logger.log(`  "tool_route": {"cli_session": "${session.session_id}"}`);
     Logger.log('\nThe session ID works like a password while it is valid. Do not commit or share it.');
     Logger.warning('> Press Ctrl+C to stop\n');
-
-    wsClient.on('tool_call', (call) => {
-      handleToolCall(call, { wsClient, topic, origin: target.origin, print }).catch((error) => {
-        Logger.error(`Tool call failed: ${error.message}`);
-      });
-    });
 
     wsClient.onClient('rejoin_error', (failedTopic, error) => {
       if (failedTopic !== topic) return;

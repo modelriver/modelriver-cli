@@ -103,7 +103,15 @@ describe('modelriver tools (end to end)', () => {
     child.stdout.on('data', (d) => { output += d; });
     child.stderr.on('data', (d) => { output += d; });
 
-    await done;
+    let timer;
+    const timedOut = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`No tool_result within 10s. Frames: ${JSON.stringify(frames)}\nCLI output:\n${output}`)), 10000);
+    });
+    try {
+      await Promise.race([done, timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
 
     const join = frames.find((m) => m.event === 'phx_join');
     expect(join.topic).toBe(CHANNEL);
