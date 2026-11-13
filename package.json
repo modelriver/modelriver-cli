@@ -1,7 +1,7 @@
 {
   "name": "@modelriver/cli",
-  "version": "1.2.6",
-  "description": "ModelRiver CLI for testing webhooks and WebSockets from production",
+  "version": "2.0.0",
+  "description": "ModelRiver CLI for testing webhooks, WebSockets and hosted tools from production",
   "main": "src/index.js",
   "bin": {
     "modelriver": "bin/modelriver"
@@ -18,7 +18,9 @@
     "testing",
     "ai",
     "llm",
-    "api"
+    "api",
+    "tools",
+    "tool-calling"
   ],
   "author": "ModelRiver",
   "license": "MIT",
@@ -31,21 +33,18 @@
     "url": "https://github.com/modelriver/modelriver-cli/issues"
   },
   "dependencies": {
-    "axios": "^1.20.0",
-    "chalk": "^4.1.2",
-    "commander": "^11.1.0",
-    "express": "^4.22.2",
-    "ora": "^5.4.1",
-    "ws": "^8.21.3"
+    "axios": "^1.21.1",
+    "chalk": "^6.0.1",
+    "commander": "^15.1.0",
+    "express": "^5.3.0",
+    "ora": "^10.0.0",
+    "ws": "^8.23.0"
   },
   "devDependencies": {
-    "jest": "^29.7.0"
-  },
-  "overrides": {
-    "qs": "6.16.0"
+    "jest": "^30.5.2"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=22.12"
   },
   "files": [
     "bin/",
@@ -53,5 +52,16 @@
     "README.md",
     "!src/**/*.test.js",
     "!**/*.test.js"
-  ]
+  ],
+  "jest": {
+    "testEnvironment": "node",
+    "moduleNameMapper": {
+      "^chalk$": "<rootDir>/test/support/chalk.js",
+      "^ora$": "<rootDir>/test/support/ora.js"
+    },
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/test/support/"
+    ]
+  }
 }

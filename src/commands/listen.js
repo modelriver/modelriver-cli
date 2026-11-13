@@ -138,12 +138,17 @@ async function listenCommand(options) {
       const app = express();
       app.use(express.json());
 
-      app.post('*', (req, res) => {
+      // Express 5 no longer accepts '*' as a path; app.use matches every path.
+      app.use((req, res, next) => {
+        if (req.method !== 'POST') return next();
+
         const signature = req.headers['x-modelriver-signature'];
         const timestamp = req.headers['x-modelriver-timestamp'];
         const webhookIdHeader = req.headers['x-modelriver-webhook-id'];
 
-        const { channel_id, timestamp: payloadTimestamp, data } = req.body;
+        // Express 5 leaves req.body undefined when no JSON body was parsed.
+        const body = req.body || {};
+        const { channel_id, timestamp: payloadTimestamp, data } = body;
 
         // Verify signature if we have a secret
         let isValid = null;
@@ -164,7 +169,7 @@ async function listenCommand(options) {
             {
               channel_id,
               data,
-              callback_url: req.body.callback_url || resolveCallbackUrl(req.body),
+              callback_url: body.callback_url || resolveCallbackUrl(body),
             },
             {
               Logger,
