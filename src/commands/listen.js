@@ -189,7 +189,10 @@ async function listenCommand(options) {
         res.status(200).json({ received: true, verified: isValid });
       });
 
-      server = app.listen(localPort, 'localhost', () => {
+      // Express 5 calls this on errors too (e.g. EADDRINUSE); the 'error'
+      // handler below reports those.
+      server = app.listen(localPort, 'localhost', (error) => {
+        if (error) return;
         Logger.success(`> Local server listening on http://localhost:${localPort}/webhook`);
       });
 

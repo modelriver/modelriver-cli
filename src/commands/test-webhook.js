@@ -6,7 +6,9 @@ const Formatter = require('../utils/formatter');
 const { maskSecret } = require('../utils/secrets');
 
 async function testWebhookCommand(options) {
-  const { workflow, message, payload, webhookSecret, port, verbose, apiKey, apiUrl, webhookUrl, showSecret } = options;
+  const { workflow, message, payload, port, verbose, apiKey, apiUrl, webhookUrl, showSecret } = options;
+  // commander names the --secret option `secret`.
+  const webhookSecret = options.secret;
 
   let server;
   let webhookId;
