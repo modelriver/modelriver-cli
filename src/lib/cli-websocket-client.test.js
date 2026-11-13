@@ -240,6 +240,44 @@ describe('CLIWebSocketClient', () => {
     warn.mockRestore();
   });
 
+  it('tracks joined topics and emits rejoin after a reconnect', async () => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, {
+      refreshToken: async () => ({ ws_token: 'tok-2' }),
+      reconnectDelayMs: 10,
+    });
+    await client.connect();
+    expect(client.isJoined('cli_tools:s1')).toBe(false);
+    await client.join('cli_tools:s1', { session_token: 'cts_x' });
+    expect(client.isJoined('cli_tools:s1')).toBe(true);
+
+    const closes = [];
+    client.onClient('close', (...args) => closes.push(args));
+    const rejoined = new Promise((resolve) => client.onClient('rejoin', resolve));
+    server.connections[0].terminate();
+    await waitFor(() => closes.length === 1);
+    expect(client.isJoined('cli_tools:s1')).toBe(false);
+    expect(closes[0][2]).toBe(true); // will reconnect
+
+    await expect(rejoined).resolves.toBe('cli_tools:s1');
+    expect(client.isJoined('cli_tools:s1')).toBe(true);
+    log.mockRestore();
+  });
+
+  it('reports a normal (1000) close from the server as final and does not reconnect', async () => {
+    const refreshToken = jest.fn(async () => ({ ws_token: 'tok-2' }));
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10 });
+    await client.connect();
+    await client.join('cli_tools:s1');
+
+    const closed = new Promise((resolve) => client.onClient('close', (...args) => resolve(args)));
+    server.connections[0].close(1000, 'bye');
+    await expect(closed).resolves.toEqual([1000, 'bye', false]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(refreshToken).not.toHaveBeenCalled();
+    expect(client.isJoined('cli_tools:s1')).toBe(false);
+  });
+
   it('does not reconnect after close()', async () => {
     const refreshToken = jest.fn(async () => ({ ws_token: 'tok-2' }));
     client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10 });

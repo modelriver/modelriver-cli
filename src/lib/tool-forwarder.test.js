@@ -1,6 +1,7 @@
 const http = require('http');
 const {
   ForwardTargetError,
+  decodeUtf8,
   isLoopbackAddress,
   parseForwardTarget,
   resolveLoopback,
@@ -18,7 +19,7 @@ describe('isLoopbackAddress', () => {
     (address) => expect(isLoopbackAddress(address)).toBe(true)
   );
 
-  it.each(['10.0.0.1', '192.168.1.10', '169.254.169.254', '8.8.8.8', '0.0.0.0', '::', '::2', '::ffff:8.8.8.8', 'fe80::1', 'localhost', '', null])(
+  it.each(['10.0.0.1', '192.168.1.10', '169.254.169.254', '8.8.8.8', '0.0.0.0', '::', '::2', '::ffff:8.8.8.8', '::ffff:10.0.0.1', '[::ffff:10.0.0.1]', '::ffff:0a00:0001', 'fe80::1', 'localhost', '', null])(
     'refuses %s',
     (address) => expect(isLoopbackAddress(address)).toBe(false)
   );
@@ -53,6 +54,13 @@ describe('resolveLoopback', () => {
     await expect(resolveLoopback('127.0.0.1', lookup)).resolves.toMatchObject({ address: '127.0.0.1', family: 4 });
     await expect(resolveLoopback('[::1]', lookup)).resolves.toMatchObject({ address: '::1', family: 6 });
     expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('checks IPv4-mapped IPv6 addresses by their IPv4 part', async () => {
+    await expect(resolveLoopback('::ffff:127.0.0.1')).resolves.toMatchObject({ address: '::ffff:127.0.0.1', family: 6 });
+    await expect(resolveLoopback('[::ffff:10.0.0.1]')).rejects.toThrow(ForwardTargetError);
+    await expect(resolveLoopback('mapped.test', lookupReturning('::ffff:10.0.0.1'))).rejects.toThrow(/::ffff:10\.0\.0\.1.*not loopback/);
+    await expect(resolveLoopback('mapped.test', lookupReturning('::ffff:127.0.0.1'))).resolves.toMatchObject({ address: '::ffff:127.0.0.1' });
   });
 
   it('refuses non-loopback IP literals', async () => {
@@ -99,6 +107,19 @@ describe('buildTargetUrl', () => {
     'refuses path %p',
     (path) => expect(() => buildTargetUrl(origin, path)).toThrow(ForwardTargetError)
   );
+});
+
+describe('decodeUtf8', () => {
+  it('decodes valid UTF-8 exactly, keeping a BOM', () => {
+    expect(decodeUtf8(Buffer.from('Zürich ✓', 'utf8'))).toBe('Zürich ✓');
+    expect(decodeUtf8(Buffer.from([0xef, 0xbb, 0xbf, 0x41]))).toBe('\ufeffA');
+    expect(decodeUtf8(Buffer.alloc(0))).toBe('');
+  });
+
+  it('returns null instead of replacing bad bytes', () => {
+    expect(decodeUtf8(Buffer.from([0x41, 0xff, 0x42]))).toBeNull();
+    expect(decodeUtf8(Buffer.from([0xe2, 0x82]))).toBeNull(); // cut-off sequence
+  });
 });
 
 describe('forwardToolCall', () => {
@@ -219,6 +240,26 @@ describe('forwardToolCall', () => {
     handler = (req, res) => { res.writeHead(200); res.end('z'.repeat(256 * 1024 + 1)); };
     const result = await forwardToolCall({ ...baseCall(), max_result_bytes: 10 * 1024 * 1024 }, { origin });
     expect(result.error).toBe('too_large');
+  });
+
+  it('sends the status with a null body when the response is not valid UTF-8', async () => {
+    handler = (req, res) => { res.writeHead(200); res.end(Buffer.from([0x7b, 0xff, 0xfe, 0x7d])); };
+    const result = await forwardToolCall(baseCall(), { origin });
+    expect(result).toMatchObject({ status: 200, body: null });
+    expect(result.error).toBeUndefined();
+    expect(result.message).toMatch(/not valid UTF-8/);
+  });
+
+  it.each([
+    ['a header value with a newline', { 'x-bad': 'a\r\nx-injected: 1' }],
+    ['a header name with a space', { 'bad header': 'x' }],
+  ])('replies connection_failed (and does not throw) for %s', async (_label, extra) => {
+    const call = baseCall();
+    Object.assign(call.headers, extra);
+    const result = await forwardToolCall(call, { origin });
+    expect(result).toMatchObject({ status: 0, body: null, error: 'connection_failed' });
+    expect(result.message).toMatch(/Could not send the request/);
+    expect(received).toBeNull();
   });
 
   it('replies connection_failed when nothing listens', async () => {

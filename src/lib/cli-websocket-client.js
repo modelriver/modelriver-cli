@@ -54,6 +54,7 @@ class CLIWebSocketClient {
     this.ref = 0;
     this.pending = new Map(); // ref -> {resolve, reject, timer, topic, event}
     this.topics = new Map(); // topic -> join payload
+    this.joined = new Set(); // topics joined on the current socket
     this.listeners = {};
     this.eventHandlers = new Map(); // event -> Set<handler(payload, topic)>
     this.heartbeatInterval = null;
@@ -121,6 +122,7 @@ class CLIWebSocketClient {
       ws.on('close', (code, reason) => {
         if (this.ws !== ws) return; // an older socket closing late
         this.stopHeartbeat();
+        this.joined.clear();
         this.rejectPending('WebSocket disconnected');
 
         if (!opened) {
@@ -131,7 +133,10 @@ class CLIWebSocketClient {
           this.listeners.close(code, reason);
         }
 
-        if (!this.closing && this.hasConnected && code !== 1000) {
+        // A normal close (1000) from the server is final: no reconnect.
+        const willReconnect = !this.closing && this.hasConnected && code !== 1000;
+        this.emit('close', code, reason ? reason.toString() : '', willReconnect);
+        if (willReconnect) {
           this.scheduleReconnect();
         }
       });
@@ -192,11 +197,22 @@ class CLIWebSocketClient {
     this.emit('reconnect');
 
     for (const [topic, payload] of this.topics) {
-      this.join(topic, payload).catch((error) => {
+      this.rejoin(topic, payload);
+    }
+  }
+
+  /**
+   * Join a topic again (after a reconnect or a channel crash). Emits "rejoin"
+   * (topic) on success and "rejoin_error" (topic, error) on failure.
+   */
+  rejoin(topic, payload) {
+    return this.join(topic, payload).then(
+      () => this.emit('rejoin', topic),
+      (error) => {
         Logger.error(`Failed to rejoin ${topic}: ${error.message}`);
         this.emit('rejoin_error', topic, error);
-      });
-    }
+      }
+    );
   }
 
   startHeartbeat() {
@@ -268,8 +284,10 @@ class CLIWebSocketClient {
    */
   async join(topic, payload = {}) {
     try {
+      this.joined.delete(topic);
       const response = await this.push(topic, 'phx_join', payload);
       this.topics.set(topic, payload);
+      this.joined.add(topic);
       this.channel = topic;
       return response;
     } catch (error) {
@@ -279,6 +297,14 @@ class CLIWebSocketClient {
       const detail = error.reply ? describeReply(error.reply) : error.message;
       throw new PushError(`Failed to join channel: ${detail}`, { reply: error.reply, reason: error.reason });
     }
+  }
+
+  /**
+   * Is the topic joined on the current socket (not disconnected or rejoining)?
+   * @param {string} topic
+   */
+  isJoined(topic) {
+    return this.isOpen() && this.joined.has(topic);
   }
 
   /**
@@ -314,13 +340,11 @@ class CLIWebSocketClient {
 
     if (msg.event === 'phx_error' || msg.event === 'phx_close') {
       if (this.topics.has(msg.topic)) {
+        this.joined.delete(msg.topic);
         Logger.warning(`Channel ${msg.topic} ${msg.event === 'phx_error' ? 'crashed' : 'was closed by the server'}`);
         this.emit('channel_' + msg.event.replace('phx_', ''), msg.topic);
         if (msg.event === 'phx_error' && !this.closing) {
-          this.join(msg.topic, this.topics.get(msg.topic)).catch((error) => {
-            Logger.error(`Failed to rejoin ${msg.topic}: ${error.message}`);
-            this.emit('rejoin_error', msg.topic, error);
-          });
+          this.rejoin(msg.topic, this.topics.get(msg.topic));
         } else if (msg.event === 'phx_close') {
           this.topics.delete(msg.topic);
         }
@@ -396,8 +420,9 @@ class CLIWebSocketClient {
   }
 
   /**
-   * Listen for client lifecycle events: "reconnect", "reconnect_failed",
-   * "rejoin_error" (topic, error), "channel_error" (topic), "channel_close" (topic).
+   * Listen for client lifecycle events: "close" (code, reason, willReconnect),
+   * "reconnect", "reconnect_failed", "rejoin" (topic), "rejoin_error" (topic, error),
+   * "channel_error" (topic), "channel_close" (topic).
    */
   onClient(name, handler) {
     return this.on(`client:${name}`, handler);

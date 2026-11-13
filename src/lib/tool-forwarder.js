@@ -143,6 +143,30 @@ function clampNumber(value, fallback, min, max) {
   return Math.min(Math.max(n, min), max);
 }
 
+/**
+ * How long a call may take: its timeout_ms (30 s when missing, at most 5 min).
+ * The server stops waiting for the result shortly after this.
+ * @param {object} call
+ * @returns {number}
+ */
+function callTimeoutMs(call) {
+  return clampNumber(call && call.timeout_ms, DEFAULT_TIMEOUT_MS, 1, MAX_TIMEOUT_MS);
+}
+
+/**
+ * Decode a response body as UTF-8 without replacing bad bytes.
+ * @param {Buffer} buffer
+ * @returns {string|null} the text, or null when it is not valid UTF-8
+ */
+function decodeUtf8(buffer) {
+  try {
+    // ignoreBOM keeps a leading BOM, so the text matches the bytes exactly.
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer);
+  } catch (error) {
+    return null;
+  }
+}
+
 function copyHeaders(headers) {
   const out = {};
   if (!headers || typeof headers !== 'object') return out;
@@ -168,7 +192,7 @@ async function forwardToolCall(call, { origin, lookup } = {}) {
   const started = Date.now();
   const done = (result) => ({ ...result, ms: Date.now() - started });
 
-  const timeoutMs = clampNumber(call.timeout_ms, DEFAULT_TIMEOUT_MS, 1, MAX_TIMEOUT_MS);
+  const timeoutMs = callTimeoutMs(call);
   const maxBytes = clampNumber(call.max_result_bytes, SERVER_RESULT_LIMIT_BYTES, 1, SERVER_RESULT_LIMIT_BYTES);
 
   let target;
@@ -190,6 +214,7 @@ async function forwardToolCall(call, { origin, lookup } = {}) {
 
   return new Promise((resolve) => {
     let settled = false;
+    let timer = null;
     const finish = (result) => {
       if (settled) return;
       settled = true;
@@ -197,54 +222,67 @@ async function forwardToolCall(call, { origin, lookup } = {}) {
       resolve(done({ ...result, url: target.href }));
     };
 
-    const req = transport.request({
-      protocol: target.protocol,
-      hostname: target.hostname.replace(/^\[|\]$/g, ''),
-      port: target.port || (target.protocol === 'https:' ? 443 : 80),
-      path: target.pathname + target.search,
-      method: 'POST',
-      headers,
-      agent: false,
-      // Connect to the address that was checked, so a second DNS answer can't
-      // send the call somewhere else.
-      lookup: (_hostname, opts, cb) => {
-        if (opts && opts.all) {
-          cb(null, resolved.addresses);
-        } else {
-          cb(null, resolved.address, resolved.family);
-        }
-      },
-    }, (res) => {
-      const chunks = [];
-      let received = 0;
+    let req;
+    try {
+      req = transport.request({
+        protocol: target.protocol,
+        hostname: target.hostname.replace(/^\[|\]$/g, ''),
+        port: target.port || (target.protocol === 'https:' ? 443 : 80),
+        path: target.pathname + target.search,
+        method: 'POST',
+        headers,
+        agent: false,
+        // Connect to the address that was checked, so a second DNS answer can't
+        // send the call somewhere else.
+        lookup: (_hostname, opts, cb) => {
+          if (opts && opts.all) {
+            cb(null, resolved.addresses);
+          } else {
+            cb(null, resolved.address, resolved.family);
+          }
+        },
+      }, (res) => {
+        const chunks = [];
+        let received = 0;
 
-      res.on('data', (chunk) => {
-        if (settled) return;
-        received += chunk.length;
-        if (received > maxBytes) {
-          finish({
-            status: res.statusCode,
-            body: null,
-            error: 'too_large',
-            message: `Response is larger than ${maxBytes} bytes`,
-          });
-          req.destroy();
-          return;
-        }
-        chunks.push(chunk);
+        res.on('data', (chunk) => {
+          if (settled) return;
+          received += chunk.length;
+          if (received > maxBytes) {
+            finish({
+              status: res.statusCode,
+              body: null,
+              error: 'too_large',
+              message: `Response is larger than ${maxBytes} bytes`,
+            });
+            req.destroy();
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on('end', () => {
+          const text = decodeUtf8(Buffer.concat(chunks));
+          if (text === null) {
+            // Send the status without a body rather than a body with bytes replaced.
+            finish({ status: res.statusCode, body: null, message: 'Response body is not valid UTF-8; sent the status without it' });
+            return;
+          }
+          finish({ status: res.statusCode, body: text });
+        });
+        res.on('error', (error) => {
+          finish({ status: 0, body: null, error: 'connection_failed', message: error.message });
+        });
+        res.on('aborted', () => {
+          finish({ status: 0, body: null, error: 'connection_failed', message: 'Response aborted' });
+        });
       });
-      res.on('end', () => {
-        finish({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
-      });
-      res.on('error', (error) => {
-        finish({ status: 0, body: null, error: 'connection_failed', message: error.message });
-      });
-      res.on('aborted', () => {
-        finish({ status: 0, body: null, error: 'connection_failed', message: 'Response aborted' });
-      });
-    });
+    } catch (error) {
+      // Node checks header names and values here and throws synchronously.
+      finish({ status: 0, body: null, error: 'connection_failed', message: `Could not send the request: ${error.message}` });
+      return;
+    }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       finish({ status: 0, body: null, error: 'timeout', message: `No complete response within ${timeoutMs}ms` });
       req.destroy();
     }, timeoutMs);
@@ -264,5 +302,7 @@ module.exports = {
   parseForwardTarget,
   resolveLoopback,
   buildTargetUrl,
+  callTimeoutMs,
+  decodeUtf8,
   forwardToolCall,
 };

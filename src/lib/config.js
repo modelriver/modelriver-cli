@@ -85,6 +85,37 @@ class Config {
     return this.get('api-key') || this.get('api_key');
   }
 
+  /**
+   * The API key from MODELRIVER_API_KEY or <config dir>/config.json, never from
+   * a .modelriverrc in the current directory.
+   * @returns {{key: string, source: string}|null} source is the env var name or the file path
+   */
+  getTrustedApiKey() {
+    const fromEnv = process.env.MODELRIVER_API_KEY && process.env.MODELRIVER_API_KEY.trim();
+    if (fromEnv) return { key: fromEnv, source: 'MODELRIVER_API_KEY' };
+
+    const homePath = this.getHomeConfigPath();
+    let home = null;
+    try {
+      home = JSON.parse(fs.readFileSync(homePath, 'utf8'));
+    } catch (error) {
+      return null;
+    }
+    const key = home && typeof home === 'object' ? (home.api_key || home['api-key']) : null;
+    if (typeof key === 'string' && key.trim()) return { key: key.trim(), source: homePath };
+    return null;
+  }
+
+  /**
+   * The API key set by a .modelriverrc in the current directory, if one is in use.
+   * @returns {string|null}
+   */
+  getLocalRcApiKey() {
+    if (this.configFile !== this.getLocalRcPath()) return null;
+    const key = this.config.api_key || this.config['api-key'];
+    return typeof key === 'string' && key.trim() ? key.trim() : null;
+  }
+
   getProjectId() {
     return this.get('project-id') || this.get('project_id');
   }

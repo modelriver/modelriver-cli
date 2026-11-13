@@ -106,6 +106,18 @@ Create a config file at `~/.modelriver/config.json` or `.modelriverrc` in your p
 
 A `.modelriverrc` in the current directory **cannot set `api_url`**; the CLI ignores it and prints a warning. Otherwise a repository you check out could send your API key to a server of its choosing. Set the API URL with `--api-url`, `MODELRIVER_API_URL` or `~/.modelriver/config.json`.
 
+`modelriver tools` also **refuses an `api_key` from a `.modelriverrc`** in the current directory. A cloned repository could plant another account's key there, and that account could then send POST requests to servers on your machine. `tools` takes the key only from `--api-key`, `MODELRIVER_API_KEY` or `~/.modelriver/config.json`.
+
+### Command-line options
+
+Global options (`-k/--api-key`, `--api-url`, `-p/--project-id`) go **before** the command name:
+
+```bash
+modelriver -p proj_123 websocket --workflow my-workflow
+```
+
+After the command name, each command's own options apply, so `-p` means the port for `listen`, `forward` and `test-webhook`, and the payload for `webhook verify`. Commands that call the API also accept `-k/--api-key` and `--api-url` after the command name, and `websocket` accepts `-p/--project-id`.
+
 The CLI never prints your API key or webhook secrets in full. It shows a masked form such as `mr_live_…a1b2`.
 
 ## Commands
@@ -327,6 +339,7 @@ modelriver tools --forward-to http://localhost:3000
 ✔ Tool forwarding active
 
 > Session: cts_...
+> Project: proj_...
 > Expires: 2026-11-15T10:00:00Z
 > Forwarding tool calls to http://localhost:3000
 
@@ -351,14 +364,21 @@ The CLI prints one line per call (tool, status, time). Add `--print` to also see
 **Options:**
 - `--forward-to <url>` (required) - your local tool server. Only the origin is used.
 - `--print` - print arguments and results
+- `-k, --api-key <key>` - API key. Without it the key comes from `MODELRIVER_API_KEY` or `~/.modelriver/config.json`, never from a `.modelriverrc` in the current directory.
+- `--api-url <url>` - API base URL
 - `-v, --verbose` - verbose output
 
 **Safety rules:**
 - Calls are only forwarded to this machine. The host must be `localhost` or resolve only to `127.0.0.0/8` or `::1`. The CLI checks the resolved address for every call and connects to that checked address. Anything else is refused, and ModelRiver gets a `target_refused` error.
 - `http` and `https` are both allowed. Redirects are not followed.
 - The CLI waits no longer than the tool's timeout, and stops reading a response once it is larger than the tool's result size limit (`too_large`).
-- A request only goes to the CLI when it names the session in `tool_route`. If the CLI is not connected, the request is refused; ModelRiver never falls back to the tool's real URL. If the CLI stops during a run, its calls time out.
-- The session lasts 24 hours. Treat the session ID like a password while it is valid. If the WebSocket drops, the CLI reconnects with a new token and rejoins the same session.
+- A request only goes to the CLI when it names the session in `tool_route`. If the CLI is not connected, the request is refused; ModelRiver never falls back to the tool's real URL.
+- If the CLI disconnects or stops during a run, new tool calls fail at once as tool unavailable. Only calls already sent to the CLI wait, and time out if no result comes back. On Ctrl+C the CLI answers its in-flight calls with `connection_failed` before it exits.
+- The session lasts 24 hours. Treat the session ID like a password while it is valid. If the WebSocket drops, the CLI reconnects with a new token and rejoins the same session. A result that was ready while the CLI was disconnected is sent after the rejoin, as long as the call's timeout hasn't passed.
+- Each API key owner can have up to 5 connected tool sessions per project. Opening another one replaces your oldest disconnected session; if all 5 are connected, it is refused until you stop one.
+- Response bodies must be UTF-8. For any other body the CLI sends the status code without the body.
+
+**Protect your production endpoints:** the CLI session receives each tool call exactly as signed, so a valid signature alone doesn't prove a call came from a live run. Calls meant for the CLI have `request.via == "cli"` in their body. Production tool endpoints should reject those.
 
 Errors the CLI can send back for a call: `timeout`, `connection_failed`, `too_large`, `target_refused`.
 

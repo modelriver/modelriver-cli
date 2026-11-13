@@ -113,11 +113,15 @@ Test a tool server running on your machine with a workflow that has hosted tools
 **What happens:**
 1. ModelRiver runs the model. When it asks for a tool, ModelRiver sends the call to Terminal 2.
 2. **Terminal 2** POSTs the call to `http://localhost:3000<tool path>` with the signed body and headers, prints `get_weather → 200 35ms` (plus arguments and result with `--print`), and sends the result back.
-3. Stop Terminal 2 mid-run: the next call times out, and nothing is sent to the tool's real URL.
+3. Stop Terminal 2 mid-run (Ctrl+C): a call it was forwarding gets `connection_failed`, the next call fails at once as tool unavailable, and nothing is sent to the tool's real URL. A call already sent to a CLI that lost its connection without stopping times out.
 
 Checks worth doing:
 - `modelriver tools --forward-to http://example.com` is refused (not loopback).
 - A tool that sleeps longer than its timeout shows `timeout`; one that returns more than its result size limit shows `too_large`.
+- A tool that returns a non-UTF-8 body (e.g. raw image bytes) sends its status with no body.
+- In a folder with a `.modelriverrc` that sets `api_key`, `modelriver tools` refuses to start unless you pass `--api-key`, set `MODELRIVER_API_KEY`, or have a key in `~/.modelriver/config.json`.
+- Up to 5 connected sessions per API key owner per project. A sixth `modelriver tools` while 5 are connected is refused; disconnected sessions are replaced, oldest first.
+- Your production tool endpoint rejects a call whose body has `request.via == "cli"` (the CLI session receives the full signed call, so production must not accept calls meant for it).
 
 ## Troubleshooting
 

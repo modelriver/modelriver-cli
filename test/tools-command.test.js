@@ -1,6 +1,8 @@
 // Runs the real `modelriver tools` command against a mock ModelRiver API,
 // Phoenix socket and local tool server.
+const fs = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
@@ -124,5 +126,110 @@ describe('modelriver tools (end to end)', () => {
     expect(result.payload).toEqual({ reply_ref: 'rr_1', status: 200, body: '{"temp":21}' });
 
     expect(output).toContain(`"tool_route": {"cli_session": "${TOKEN}"}`);
+    expect(output).toContain('Project: p1');
+  }, 15000);
+
+  // Mock API + socket; `onJoin(ws, msg)` runs after an ok join reply.
+  async function startApi(onJoin = () => {}) {
+    const hits = [];
+    api = http.createServer((req, res) => {
+      hits.push(req.url);
+      res.setHeader('content-type', 'application/json');
+      if (req.url === '/api/v1/cli/connect') {
+        res.writeHead(200);
+        return res.end(JSON.stringify({ ws_token: 'ws-tok', websocket_url: `ws://127.0.0.1:${api.address().port}/cli` }));
+      }
+      if (req.url === '/api/v1/cli/tool-sessions') {
+        res.writeHead(201);
+        return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: '2026-11-15T00:00:00Z', project_id: 'p1' }));
+      }
+      res.writeHead(404);
+      return res.end('{}');
+    });
+    wss = new WebSocketServer({ server: api });
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.event === 'heartbeat') return;
+        ws.send(JSON.stringify({ topic: msg.topic, event: 'phx_reply', ref: msg.ref, payload: { status: 'ok', response: {} } }));
+        if (msg.event === 'phx_join') onJoin(ws, msg);
+      });
+    });
+    await listen(api);
+    return hits;
+  }
+
+  function runCli(args, { env = {}, cwd } = {}) {
+    child = spawn(process.execPath, [CLI, ...args], { cwd, env: { ...process.env, ...env } });
+    let output = '';
+    child.stdout.on('data', (d) => { output += d; });
+    child.stderr.on('data', (d) => { output += d; });
+    const exited = new Promise((resolve) => child.on('exit', (code) => resolve({ code, output })));
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(`CLI did not exit. Output:\n${output}`)), 10000).unref());
+    return Promise.race([exited, timeout]);
+  }
+
+  it('refuses an API key that comes from a .modelriverrc in the current directory', async () => {
+    const hits = await startApi();
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'modelriver-cloned-repo-'));
+    try {
+      fs.writeFileSync(path.join(repo, '.modelriverrc'), JSON.stringify({ api_key: 'mr_live_planted_key_0123456789' }));
+      const { code, output } = await runCli(
+        ['tools', '--forward-to', 'http://localhost:3000', '--api-url', `http://localhost:${api.address().port}`],
+        { cwd: repo }
+      );
+      expect(code).toBe(1);
+      expect(output).toMatch(/does not use the API key in .*\.modelriverrc/);
+      expect(output).not.toContain('mr_live_planted_key_0123456789');
+      expect(hits).toEqual([]); // never talked to the API
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it('on Ctrl+C answers a call still in flight with connection_failed, then exits', async () => {
+    // A tool server that never answers.
+    toolServer = http.createServer(() => {});
+    await listen(toolServer);
+    const results = [];
+    let callForwarded;
+    const forwarded = new Promise((resolve) => { callForwarded = resolve; });
+    toolServer.on('request', () => callForwarded());
+
+    await startApi((ws, msg) => {
+      ws.on('message', (data) => {
+        const m = JSON.parse(data.toString());
+        if (m.event === 'tool_result') results.push(m.payload);
+      });
+      ws.send(JSON.stringify({
+        topic: msg.topic, event: 'tool_call', ref: null,
+        payload: { reply_ref: 'rr_ctrl_c', tool: 'slow_tool', path: '/slow', body: '{}', headers: {}, timeout_ms: 60000 },
+      }));
+    });
+
+    const run = runCli(
+      ['tools', '--forward-to', `http://localhost:${toolServer.address().port}`, '--api-url', `http://localhost:${api.address().port}`],
+      { env: { MODELRIVER_API_KEY: 'mr_test_e2e_abcdefghijklmnopqrstuvwxyz' } }
+    );
+    await forwarded;
+    const sent = Date.now();
+    child.kill('SIGINT');
+    const { code, output } = await run;
+
+    expect(code).toBe(0);
+    expect(Date.now() - sent).toBeLessThan(3000);
+    expect(results).toEqual([{ reply_ref: 'rr_ctrl_c', error: 'connection_failed' }]);
+    expect(output).toContain('Stopping tool forwarding');
+  }, 15000);
+
+  it('exits non-zero when the server closes the socket normally (code 1000)', async () => {
+    await startApi((ws) => setTimeout(() => ws.close(1000, 'session ended'), 50));
+    const { code, output } = await runCli(
+      ['tools', '--forward-to', 'http://localhost:3000', '--api-url', `http://localhost:${api.address().port}`],
+      { env: { MODELRIVER_API_KEY: 'mr_test_e2e_abcdefghijklmnopqrstuvwxyz' } }
+    );
+    expect(output).toContain('Tool forwarding active');
+    expect(output).toMatch(/server closed the connection \(code 1000: session ended\)/);
+    expect(code).toBe(1);
   }, 15000);
 });

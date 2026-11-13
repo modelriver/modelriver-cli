@@ -3,7 +3,8 @@
 // Tests must never read or write the real ~/.modelriver: a test once
 // overwrote a developer's real config.json. So for every test file:
 // - MODELRIVER_CONFIG_DIR and HOME point at a new temp folder (child
-//   processes the tests spawn inherit both);
+//   processes the tests spawn inherit both), and MODELRIVER_* settings from
+//   the shell are cleared;
 // - os.homedir() throws, so nothing can fall back to the real home folder;
 // - any fs call on a path inside the real ~/.modelriver throws.
 const fs = require('fs');
@@ -17,6 +18,11 @@ const realConfigDir = path.join(realHome, '.modelriver');
 
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'modelriver-test-home-'));
 const tempConfigDir = path.join(tempHome, '.modelriver');
+
+// Settings from the developer's shell must not leak into tests either.
+for (const name of ['MODELRIVER_API_KEY', 'MODELRIVER_API_URL', 'MODELRIVER_PROJECT_ID', 'MODELRIVER_FORWARD_URL']) {
+  delete process.env[name];
+}
 
 process.env.HOME = tempHome;
 process.env.USERPROFILE = tempHome;
