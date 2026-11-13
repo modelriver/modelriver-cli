@@ -1,5 +1,6 @@
 const axios = require('axios');
 const config = require('./config');
+const { checkApiUrl } = require('../utils/url-helpers');
 
 function createAuthHeaders(apiKey) {
   return {
@@ -11,8 +12,6 @@ function createAuthHeaders(apiKey) {
 class ApiClient {
   constructor(apiKey = null, apiUrl = null) {
     this.apiKey = apiKey || config.getApiKey();
-    this.apiUrl = (apiUrl || config.getApiUrl()).replace(/\/$/, '');
-
     if (!this.apiKey) {
       throw new Error('API key is required. Set MODELRIVER_API_KEY env var or use --api-key flag.');
     }
@@ -21,6 +20,9 @@ class ApiClient {
     if (!this.apiKey.startsWith('mr_live_') && !this.apiKey.startsWith('mr_test_')) {
       throw new Error('Invalid API key format. API keys must start with "mr_live_" or "mr_test_".');
     }
+
+    // Throws unless the URL is https (http is allowed only for localhost).
+    this.apiUrl = checkApiUrl(apiUrl || config.getApiUrl());
 
     // Determine API path: /v1 in production (api.modelriver.com), /api/v1 in dev/test
     try {
@@ -31,12 +33,6 @@ class ApiClient {
     } catch (e) {
       // Fallback to dev path if URL parsing fails
       this.apiPath = '/api/v1';
-    }
-
-    // Debug: Log API key info if DEBUG is set
-    if (process.env.DEBUG) {
-      console.log('[DEBUG] API Key (first 30 chars):', this.apiKey ? this.apiKey.substring(0, 30) + '...' : 'NOT SET');
-      console.log('[DEBUG] Authorization header will be:', this.apiKey ? `Bearer ${this.apiKey.substring(0, 30)}...` : 'NOT SET');
     }
 
     this.client = axios.create({
@@ -139,11 +135,8 @@ class ApiClient {
     try {
       const url = `${this.apiPath}/cli/connect`;
       
-      // Debug: Log the request details
       if (process.env.DEBUG || this.verbose) {
         console.log('[DEBUG] Making request to:', `${this.apiUrl}${url}`);
-        console.log('[DEBUG] API Key (first 30 chars):', this.apiKey ? this.apiKey.substring(0, 30) + '...' : 'NOT SET');
-        console.log('[DEBUG] Authorization header:', this.apiKey ? `Bearer ${this.apiKey.substring(0, 30)}...` : 'NOT SET');
       }
 
       const response = await this.client.post(url, {});
@@ -175,14 +168,39 @@ class ApiClient {
   }
 
   /**
+   * Is this URL on the configured API host (same scheme, host and port)?
+   * @param {string} url
+   * @returns {boolean}
+   */
+  isApiOrigin(url) {
+    try {
+      return new URL(url).origin === new URL(this.apiUrl).origin;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
    * Send an event-driven callback to complete a pending channel.
    * @param {string} callbackUrl - Full callback URL from webhook payload
    * @param {object} body - Callback payload { data?, task_id?, metadata? }
    * @returns {Promise<object>} - Axios-like response { status, data }
    */
   async sendCallback(callbackUrl, body) {
+    // The API key goes only to the configured API host, never to a URL taken
+    // from a webhook payload that points somewhere else.
+    if (!this.isApiOrigin(callbackUrl)) {
+      let origin = callbackUrl;
+      try { origin = new URL(callbackUrl).origin; } catch (error) { /* keep as given */ }
+      throw new Error(
+        `Refusing to send your API key to ${origin}: callback URLs must be on the configured API host (${new URL(this.apiUrl).origin}). ` +
+        'Use --channel-id, or set --api-url to match.'
+      );
+    }
+
     const response = await axios.post(callbackUrl, body, {
       headers: createAuthHeaders(this.apiKey),
+      maxRedirects: 0,
       validateStatus: (status) => status < 500,
     });
 

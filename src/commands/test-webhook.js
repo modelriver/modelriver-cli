@@ -3,9 +3,10 @@ const ApiClient = require('../lib/api-client');
 const WebhookVerifier = require('../lib/webhook-verifier');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
+const { maskSecret } = require('../utils/secrets');
 
 async function testWebhookCommand(options) {
-  const { workflow, message, payload, webhookSecret, port, verbose, apiKey, apiUrl, webhookUrl } = options;
+  const { workflow, message, payload, webhookSecret, port, verbose, apiKey, apiUrl, webhookUrl, showSecret } = options;
 
   let server;
   let webhookId;
@@ -189,8 +190,12 @@ async function testWebhookCommand(options) {
       Logger.info(`\n> Webhook ID: ${webhookId}`);
       Logger.info(`> URL: ${finalWebhookUrl}`);
       if (actualSecret) {
-        Logger.warning(`> Secret: ${actualSecret}`);
-        Logger.warning('> Save this secret - it won\'t be shown again!');
+        if (showSecret) {
+          Logger.warning(`> Secret: ${actualSecret}`);
+          Logger.warning('> Save this secret - it won\'t be shown again!');
+        } else {
+          Logger.warning(`> Secret: ${maskSecret(actualSecret)} (hidden; run with --show-secret to print it once)`);
+        }
         if (!webhookSecret) {
           Logger.info('\n💡 Tip: Use --secret next time to set a custom secret');
         }

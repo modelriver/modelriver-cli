@@ -69,6 +69,18 @@ describe('webhook-payload utils', () => {
     expect(hint).not.toContain('localhost:4000');
   });
 
+  test('callback hints never include any part of the API key', () => {
+    const hint = buildCallbackHint(
+      'https://api.modelriver.com/v1/callback/abc',
+      'abc',
+      'mr_live_secretkey1234567890'
+    );
+
+    expect(hint).toContain('Bearer $MODELRIVER_API_KEY');
+    expect(hint).not.toContain('mr_live_');
+    expect(hint).not.toContain('secretkey');
+  });
+
   test('classifies websocket statuses', () => {
     expect(isIntermediateWebSocketStatus('ai_generated')).toBe(true);
     expect(isIntermediateWebSocketStatus('step_received')).toBe(true);

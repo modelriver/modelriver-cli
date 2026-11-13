@@ -122,8 +122,48 @@ function parseForwardUrl(url) {
     }
 }
 
+const LOCAL_API_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+/**
+ * Is this API host one that may be reached over plain http?
+ * @param {string} hostname - URL hostname (IPv6 may be bracketed)
+ * @returns {boolean}
+ */
+function isLocalApiHost(hostname) {
+    return LOCAL_API_HOSTS.has(String(hostname || '').toLowerCase());
+}
+
+/**
+ * Check an API base URL. It must be https, except for localhost,
+ * 127.0.0.1 and ::1, which may use http.
+ * @param {string} apiUrl
+ * @returns {string} the URL without a trailing slash
+ * @throws {Error} when the URL is invalid or uses http for another host
+ */
+function checkApiUrl(apiUrl) {
+    let url;
+    try {
+        url = new URL(apiUrl);
+    } catch (error) {
+        throw new Error(`Invalid API URL "${apiUrl}"`);
+    }
+
+    if (url.protocol === 'https:') {
+        return apiUrl.replace(/\/$/, '');
+    }
+    if (url.protocol === 'http:' && isLocalApiHost(url.hostname)) {
+        return apiUrl.replace(/\/$/, '');
+    }
+    if (url.protocol === 'http:') {
+        throw new Error(`API URL must use https (only localhost, 127.0.0.1 and ::1 may use http): ${url.origin}`);
+    }
+    throw new Error(`API URL must use https: ${url.origin}`);
+}
+
 module.exports = {
     normalizeWebhookUrl,
+    checkApiUrl,
+    isLocalApiHost,
     extractPort,
     isValidApiKeyFormat,
     parseForwardUrl

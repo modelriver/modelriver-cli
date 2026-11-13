@@ -142,3 +142,31 @@ describe('URL Helpers', () => {
         });
     });
 });
+
+describe('checkApiUrl', () => {
+  const { checkApiUrl, isLocalApiHost } = require('./url-helpers');
+
+  it('accepts https anywhere and strips a trailing slash', () => {
+    expect(checkApiUrl('https://api.modelriver.com/')).toBe('https://api.modelriver.com');
+  });
+
+  it('accepts http only for localhost, 127.0.0.1 and ::1', () => {
+    expect(checkApiUrl('http://localhost:4000')).toBe('http://localhost:4000');
+    expect(checkApiUrl('http://127.0.0.1:4000')).toBe('http://127.0.0.1:4000');
+    expect(checkApiUrl('http://[::1]:4000')).toBe('http://[::1]:4000');
+    expect(() => checkApiUrl('http://127.0.0.2:4000')).toThrow(/must use https/);
+    expect(() => checkApiUrl('http://localhost.attacker.example')).toThrow(/must use https/);
+    expect(() => checkApiUrl('http://api.modelriver.com')).toThrow(/must use https/);
+  });
+
+  it('refuses other schemes and invalid URLs', () => {
+    expect(() => checkApiUrl('ws://localhost:4000')).toThrow(/must use https/);
+    expect(() => checkApiUrl('api.modelriver.com')).toThrow(/Invalid API URL/);
+  });
+
+  it('knows the local hosts', () => {
+    expect(isLocalApiHost('LOCALHOST')).toBe(true);
+    expect(isLocalApiHost('[::1]')).toBe(true);
+    expect(isLocalApiHost('0.0.0.0')).toBe(false);
+  });
+});

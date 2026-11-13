@@ -110,6 +110,7 @@ program
   .option('-P, --payload <json>', 'Custom JSON payload')
   .option('-u, --webhook-url <url>', 'Webhook URL (if not provided, starts local server on --port)')
   .option('-s, --secret <secret>', 'Webhook secret (optional, auto-generated if not provided)')
+  .option('--show-secret', 'Print the new webhook secret in full (hidden by default)')
   .option('-p, --port <port>', 'Local server port when using local server (default: 3001)')
   .option('-v, --verbose', 'Verbose output')
   .action((options) => {
@@ -130,6 +131,7 @@ program
   .option('-P, --payload <json>', 'Custom JSON payload')
   .option('-u, --webhook-url <url>', 'Webhook URL to receive response')
   .option('--print-channel', 'Print channel details')
+  .option('--show-secret', 'Print the new webhook secret in full (hidden by default)')
   .action((options) => {
     triggerCommand({
       ...options,

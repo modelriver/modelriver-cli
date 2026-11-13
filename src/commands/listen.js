@@ -5,6 +5,7 @@ const WebhookVerifier = require('../lib/webhook-verifier');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
 const { parseForwardUrl } = require('../utils/url-helpers');
+const { maskSecret } = require('../utils/secrets');
 const {
   printWebhookDetails,
   resolveCallbackUrl,
@@ -63,7 +64,7 @@ async function listenCommand(options) {
     // Validate API key format
     if (!apiKey.startsWith('mr_live_') && !apiKey.startsWith('mr_test_')) {
       spinner.fail('Invalid API key format');
-      Logger.error(`API key must start with "mr_live_" or "mr_test_". Got: ${apiKey.substring(0, 20)}...`);
+      Logger.error('API key must start with "mr_live_" or "mr_test_".');
       Logger.warning('> Make sure you copied the full API key from the dashboard');
       process.exit(1);
     }
@@ -74,7 +75,7 @@ async function listenCommand(options) {
     if (verbose) {
       Logger.info(`> API URL: ${apiClient.apiUrl}`);
       Logger.info(`> API Path: ${apiClient.apiPath}`);
-      Logger.info(`> API Key (first 30 chars): ${apiKey.substring(0, 30)}...`);
+      Logger.info(`> API Key: ${maskSecret(apiKey)}`);
     }
 
     // Step 1: Get CLI WebSocket token
@@ -127,8 +128,8 @@ async function listenCommand(options) {
     Logger.info(`> Channel: ${channel}`);
     Logger.info(`> Local port: ${localPort}`);
     if (webhookSecret) {
-      Logger.warning(`> Webhook secret: ${webhookSecret}`);
-      Logger.warning('> Save this secret for webhook-test-server!\n');
+      Logger.info(`> Webhook secret loaded (${maskSecret(webhookSecret)}); signatures are checked with it`);
+      Logger.info('> The full secret is in the ModelRiver console under Webhooks\n');
     }
     Logger.warning('> Press Ctrl+C to stop forwarding\n');
 

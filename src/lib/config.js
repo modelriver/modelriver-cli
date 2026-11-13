@@ -2,6 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const CONFIG_DIR_MODE = 0o700;
+const CONFIG_FILE_MODE = 0o600;
+// Keys a .modelriverrc in the current directory may not set. A checked-out
+// repository could otherwise send your API key to a server of its choosing.
+const LOCAL_RC_FORBIDDEN_KEYS = ['api_url', 'api-url'];
+
 class Config {
   constructor() {
     this.configFile = this.findConfigFile();
@@ -10,7 +16,7 @@ class Config {
 
   findConfigFile() {
     // Check for .modelriverrc in current directory
-    const localRc = path.join(process.cwd(), '.modelriverrc');
+    const localRc = this.getLocalRcPath();
     if (fs.existsSync(localRc)) {
       return localRc;
     }
@@ -29,12 +35,34 @@ class Config {
       return {};
     }
 
+    let loaded;
     try {
       const content = fs.readFileSync(this.configFile, 'utf8');
-      return JSON.parse(content);
+      loaded = JSON.parse(content);
     } catch (error) {
       return {};
     }
+    if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded)) {
+      return {};
+    }
+
+    if (this.configFile === this.getLocalRcPath()) {
+      const ignored = LOCAL_RC_FORBIDDEN_KEYS.filter((key) => key in loaded);
+      if (ignored.length > 0) {
+        for (const key of ignored) delete loaded[key];
+        this.ignoredLocalKeys = ignored;
+        console.warn(
+          `⚠ Ignoring ${ignored.join(', ')} in ${this.configFile}: a .modelriverrc in the current ` +
+          'directory may not change the API URL. Use --api-url or MODELRIVER_API_URL instead.'
+        );
+      }
+    }
+
+    return loaded;
+  }
+
+  getLocalRcPath() {
+    return path.join(process.cwd(), '.modelriverrc');
   }
 
   get(key, defaultValue = null) {
@@ -46,7 +74,7 @@ class Config {
     }
 
     const configKey = key.replace(/-/g, '_');
-    if (this.config[configKey]) {
+    if (typeof this.config[configKey] === 'string' && this.config[configKey]) {
       return this.config[configKey].trim();
     }
 
@@ -94,10 +122,11 @@ class Config {
     const configDir = path.join(os.homedir(), '.modelriver');
     const configPath = this.getHomeConfigPath();
 
-    // Create directory if it doesn't exist
+    // The folder is readable only by you (0700), the file too (0600).
     if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
+      fs.mkdirSync(configDir, { recursive: true, mode: CONFIG_DIR_MODE });
     }
+    fs.chmodSync(configDir, CONFIG_DIR_MODE);
 
     // Load existing config and merge
     let existingConfig = {};
@@ -113,8 +142,17 @@ class Config {
     // Merge with new config data
     const mergedConfig = { ...existingConfig, ...configData };
 
-    // Write to file
-    fs.writeFileSync(configPath, JSON.stringify(mergedConfig, null, 2), 'utf8');
+    // Write a new file with mode 0600 and move it into place, so the API key
+    // is never in a file other users can read, even for a moment.
+    const tmpPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(mergedConfig, null, 2), { encoding: 'utf8', mode: CONFIG_FILE_MODE, flag: 'wx' });
+      fs.chmodSync(tmpPath, CONFIG_FILE_MODE);
+      fs.renameSync(tmpPath, configPath);
+    } catch (error) {
+      try { fs.unlinkSync(tmpPath); } catch (cleanupError) { /* already gone */ }
+      throw error;
+    }
 
     // Reload config
     this.configFile = configPath;
@@ -133,5 +171,8 @@ class Config {
 }
 
 module.exports = new Config();
+module.exports.Config = Config;
+module.exports.CONFIG_DIR_MODE = CONFIG_DIR_MODE;
+module.exports.CONFIG_FILE_MODE = CONFIG_FILE_MODE;
 
 

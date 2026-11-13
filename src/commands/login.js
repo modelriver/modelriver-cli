@@ -2,6 +2,7 @@ const readline = require('readline');
 const config = require('../lib/config');
 const Logger = require('../utils/logger');
 const { normalizeWebhookUrl, isValidApiKeyFormat } = require('../utils/url-helpers');
+const { maskSecret } = require('../utils/secrets');
 
 /**
  * Create a readline interface for interactive prompts
@@ -26,12 +27,8 @@ function prompt(rl, question, defaultValue = '', maskDefault = false, showDefaul
     return new Promise((resolve) => {
         let displayDefault = defaultValue;
         if (defaultValue && maskDefault) {
-            // Show masked version like "mr_live_...a1b2"
-            if (defaultValue.length > 10) {
-                displayDefault = `${defaultValue.substring(0, 8)}...${defaultValue.substring(defaultValue.length - 4)}`;
-            } else {
-                displayDefault = '********';
-            }
+            // Show masked version like "mr_live_…a1b2"
+            displayDefault = maskSecret(defaultValue);
         }
 
         let displayQuestion = question + ': ';
@@ -72,7 +69,7 @@ async function loginCommand(options) {
         if (currentApiKey || currentForwardUrl) {
             Logger.info('Current configuration:');
             if (currentApiKey) {
-                Logger.info(`  API Key: ${currentApiKey.substring(0, 8)}...${currentApiKey.substring(currentApiKey.length - 4)}`);
+                Logger.info(`  API Key: ${maskSecret(currentApiKey)}`);
             }
             if (currentForwardUrl) {
                 Logger.info(`  Forward URL: ${currentForwardUrl}`);
@@ -84,7 +81,7 @@ async function loginCommand(options) {
         if (process.env.MODELRIVER_API_KEY) {
             Logger.warning('WARNING: MODELRIVER_API_KEY environment variable is set.');
             Logger.warning('This environment variable will override any API key you save here.');
-            Logger.warning(`Current env value: ${process.env.MODELRIVER_API_KEY.substring(0, 15)}...`);
+            Logger.warning(`Current env value: ${maskSecret(process.env.MODELRIVER_API_KEY)}`);
             Logger.warning('To use the key you are about to save, you must unset this variable:');
             Logger.warning('  unset MODELRIVER_API_KEY');
             console.log('');
@@ -144,7 +141,7 @@ async function loginCommand(options) {
 
             // Display saved configuration
             Logger.section('Saved Configuration');
-            Logger.success(`API Key: ${apiKey.substring(0, 25)}...`);
+            Logger.success(`API Key: ${maskSecret(apiKey)}`);
             Logger.success(`Forward URL: ${forwardUrl}`);
             Logger.info(`Config file: ${config.getHomeConfigPath()}`);
 
