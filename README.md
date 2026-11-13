@@ -1,6 +1,10 @@
 # ModelRiver CLI
 
-A command-line tool for testing webhooks and WebSockets from live/production ModelRiver, similar to Stripe CLI.
+A command-line tool for testing webhooks, WebSockets and hosted tools from live/production ModelRiver, similar to Stripe CLI.
+
+## Requirements
+
+- **Node.js 22.12 or later.** Version 2.0 needs Node 22.12+ because its dependencies (chalk, ora, commander) are ESM-only and are loaded with `require()`. On older Node, stay on `@modelriver/cli@1`.
 
 ## Installation
 
@@ -73,7 +77,7 @@ modelriver t -w my-workflow -m "Hello"  # Same as: modelriver trigger ...
 modelriver login
 ```
 
-This saves your configuration to `~/.modelriver/config.json`.
+This saves your configuration to `~/.modelriver/config.json`. The file is written readable only by you (mode `0600`, folder `0700`).
 
 ### Environment Variables
 
@@ -83,6 +87,8 @@ Set these environment variables for convenience:
 export MODELRIVER_API_KEY=mr_live_YOUR_API_KEY
 export MODELRIVER_API_URL=https://api.modelriver.com  # Optional, defaults to production
 ```
+
+The API URL must use `https`. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `::1` (a local ModelRiver server).
 
 ### Config File
 
@@ -97,6 +103,10 @@ Create a config file at `~/.modelriver/config.json` or `.modelriverrc` in your p
 ```
 
 **Priority**: CLI arguments > Environment variables > Config file > Defaults
+
+A `.modelriverrc` in the current directory **cannot set `api_url`**; the CLI ignores it and prints a warning. Otherwise a repository you check out could send your API key to a server of its choosing. Set the API URL with `--api-url`, `MODELRIVER_API_URL` or `~/.modelriver/config.json`.
+
+The CLI never prints your API key or webhook secrets in full. It shows a masked form such as `mr_live_…a1b2`.
 
 ## Commands
 
@@ -303,6 +313,55 @@ Channel Details
 > Or use "modelriver websocket" to connect and receive responses
 ```
 
+The secret of a webhook created with `--webhook-url` is masked. Add `--show-secret` to print it once in full.
+
+### `modelriver tools` - Test Hosted Tools on Your Machine
+
+With hosted tools, ModelRiver calls your workflow's tool endpoints itself. In production those must be public HTTPS URLs; ModelRiver refuses localhost and private addresses. `modelriver tools` lets you test a tool server running on your laptop: ModelRiver sends the tool calls to the CLI over its WebSocket, and the CLI forwards them to your local server.
+
+```bash
+modelriver tools --forward-to http://localhost:3000
+```
+
+```
+✔ Tool forwarding active
+
+> Session: cts_...
+> Expires: 2026-11-15T10:00:00Z
+> Forwarding tool calls to http://localhost:3000
+
+Add this to a POST /v1/ai/async request to send its tool calls here:
+  "tool_route": {"cli_session": "cts_..."}
+```
+
+Then send a request that names the session:
+
+```json
+{
+  "workflow": "my-workflow-with-tools",
+  "messages": [{ "role": "user", "content": "What's the weather in Pune?" }],
+  "tool_route": { "cli_session": "cts_..." }
+}
+```
+
+Each tool call is POSTed to `<forward-to origin><path of the tool's endpoint URL>`. For a tool whose endpoint is `https://tools.example.com/weather?units=metric` and `--forward-to http://localhost:3000`, the call goes to `http://localhost:3000/weather?units=metric`. The body and headers (`x-modelriver-timestamp`, `x-modelriver-tool-call-id`, `x-modelriver-key-id`, `x-modelriver-signature`) are exactly what a live call sends, so your signature check runs unchanged.
+
+The CLI prints one line per call (tool, status, time). Add `--print` to also see each call's arguments and result.
+
+**Options:**
+- `--forward-to <url>` (required) - your local tool server. Only the origin is used.
+- `--print` - print arguments and results
+- `-v, --verbose` - verbose output
+
+**Safety rules:**
+- Calls are only forwarded to this machine. The host must be `localhost` or resolve only to `127.0.0.0/8` or `::1`. The CLI checks the resolved address for every call and connects to that checked address. Anything else is refused, and ModelRiver gets a `target_refused` error.
+- `http` and `https` are both allowed. Redirects are not followed.
+- The CLI waits no longer than the tool's timeout, and stops reading a response once it is larger than the tool's result size limit (`too_large`).
+- A request only goes to the CLI when it names the session in `tool_route`. If the CLI is not connected, the request is refused; ModelRiver never falls back to the tool's real URL. If the CLI stops during a run, its calls time out.
+- The session lasts 24 hours. Treat the session ID like a password while it is valid. If the WebSocket drops, the CLI reconnects with a new token and rejoins the same session.
+
+Errors the CLI can send back for a call: `timeout`, `connection_failed`, `too_large`, `target_refused`.
+
 ### `modelriver test-webhook` - Test Webhook Delivery End-to-End
 
 Test the complete webhook flow - creates a webhook, makes an async request, and waits for the webhook response:
@@ -453,10 +512,18 @@ Set the API key via:
 - Check network connectivity
 - If using production, ensure you're using `wss://` (secure WebSocket)
 
+### "tools: ... is not loopback"
+
+`modelriver tools` only forwards to this machine. Use `http://localhost:<port>`, `http://127.0.0.1:<port>` or `http://[::1]:<port>`. If your tool server runs in a container or VM, publish its port on localhost.
+
+### "API URL must use https"
+
+Use an `https://` API URL. Only `localhost`, `127.0.0.1` and `::1` may use `http://`.
+
 ### "Webhook signature verification failed"
 
 - Ensure the secret matches exactly (no extra spaces)
-- Verify timestamp is recent (within 5 minutes)
+- Verify timestamp is recent (within 5 minutes). The CLI rejects signatures whose timestamp is more than 5 minutes from now, as a receiver should; `modelriver webhook verify` says so when only the timestamp is the problem
 - Check that payload structure matches expected format
 
 **Note**: The CLI does not support creating permanent webhooks. Use the ModelRiver dashboard to create webhooks for production use. The CLI only creates temporary webhooks for testing (via `listen` and `test-webhook` commands), which are automatically cleaned up.
@@ -472,6 +539,7 @@ The CLI uses these ModelRiver API endpoints:
 - `POST /v1/webhooks` - Create a new webhook
 - `DELETE /v1/webhooks/:id` - Delete a webhook
 - `POST /v1/cli/connect` - Connect CLI and get WebSocket token
+- `POST /v1/cli/tool-sessions` - Open a CLI tool session (`modelriver tools`)
 - `POST /v1/callback/:channel_id` - Complete event-driven callback
 
 **Development** (localhost or custom API URL):
@@ -493,6 +561,11 @@ Tests cover critical components including:
 - API client validation
 - Output formatting
 - Event-driven webhook payload helpers
+- Tool forwarding: loopback-only targets (including names that resolve to public IPs), exact body and headers, timeouts and size limits
+- WebSocket client: push/reply refs, several topics, reconnect with a fresh token
+- Config file permissions and the `.modelriverrc` `api_url` rule
+
+Tests run on Node 22.12+. chalk and ora are ESM-only, and Jest can only `require()` ESM on Node 24.9+, so the tests map them to small stand-ins in `test/support/`.
 
 
 ## License
