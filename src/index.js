@@ -9,6 +9,7 @@ const { triggerCommand } = require('./commands/trigger');
 const { callbackCommand } = require('./commands/callback');
 const { testWebhookCommand } = require('./commands/test-webhook');
 const { listWebhooks, verifyWebhook } = require('./commands/webhook');
+const { toolsCommand } = require('./commands/tools');
 const config = require('./lib/config');
 
 const program = new Command();
@@ -17,7 +18,7 @@ const { version } = require('../package.json');
 
 program
   .name('modelriver')
-  .description('ModelRiver CLI for testing webhooks and WebSockets from production')
+  .description('ModelRiver CLI for testing webhooks, WebSockets and hosted tools from production')
   .version(version);
 
 // Global options
@@ -137,6 +138,27 @@ program
       ...options,
       apiKey: options.apiKey || program.opts().apiKey,
       apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl()
+    });
+  });
+
+// Tools command - send hosted tool calls to a server on this machine
+program
+  .command('tools')
+  .description('Forward hosted tool calls to a tool server on this machine (localhost only)')
+  .requiredOption('--forward-to <url>', 'Local tool server origin, e.g. http://localhost:3000 (localhost, 127.0.0.0/8 or ::1)')
+  .option('--print', 'Print each call\'s arguments and result')
+  .option('-v, --verbose', 'Verbose output')
+  .addHelpText('after', `
+Opens a CLI tool session and prints its ID. Send a request with
+  "tool_route": {"cli_session": "<session id>"}
+and ModelRiver sends that request's tool calls here. Each call is POSTed to
+<forward-to origin><path of the tool's endpoint URL> with the same body and
+signature headers a live call has, so your signature check runs unchanged.`)
+  .action((options) => {
+    toolsCommand({
+      ...options,
+      apiKey: options.apiKey || program.opts().apiKey,
+      apiUrl: options.apiUrl || program.opts().apiUrl || config.getApiUrl(),
     });
   });
 

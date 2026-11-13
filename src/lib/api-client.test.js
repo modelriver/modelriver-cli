@@ -133,6 +133,40 @@ describe('ApiClient', () => {
         });
     });
 
+    describe('createToolSession', () => {
+        it('POSTs to <apiPath>/cli/tool-sessions and returns the session', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+            const session = { session_id: 'cts_abc', expires_at: '2026-11-15T00:00:00Z', channel: 'cli_tools:cts_abc' };
+            client.client.post = jest.fn(async () => ({ status: 201, data: session }));
+
+            await expect(client.createToolSession()).resolves.toEqual(session);
+            expect(client.client.post).toHaveBeenCalledWith('/v1/cli/tool-sessions', {});
+        });
+
+        it('uses /api/v1 on localhost', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'http://localhost:4000');
+            client.client.post = jest.fn(async () => ({ status: 201, data: { session_id: 'cts_1' } }));
+            await client.createToolSession();
+            expect(client.client.post).toHaveBeenCalledWith('/api/v1/cli/tool-sessions', {});
+        });
+
+        it('reports server errors', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+            client.client.post = jest.fn(async () => ({ status: 403, data: { error: 'hosted_tools_disabled' } }));
+            await expect(client.createToolSession()).rejects.toThrow('Failed to open tool session: hosted_tools_disabled');
+        });
+
+        it('rejects a reply without a session_id', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+            client.client.post = jest.fn(async () => ({ status: 200, data: {} }));
+            await expect(client.createToolSession()).rejects.toThrow(/session_id/);
+        });
+    });
+
     describe('sendCallback', () => {
         it('refuses to send the API key to another host', async () => {
             const axios = require('axios');

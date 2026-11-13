@@ -168,6 +168,40 @@ class ApiClient {
   }
 
   /**
+   * Open a CLI tool session. Tool calls for this session are sent to the CLI
+   * over the WebSocket channel the response names.
+   * @returns {Promise<object>} - {session_id, expires_at, channel}
+   */
+  async createToolSession() {
+    const url = `${this.apiPath}/cli/tool-sessions`;
+    let response;
+    try {
+      response = await this.client.post(url, {});
+    } catch (error) {
+      if (error.response) {
+        response = error.response;
+      } else if (error.request) {
+        throw new Error('Failed to open tool session: No response from server. Is the backend running?');
+      } else {
+        throw new Error(`Failed to open tool session: ${error.message}`);
+      }
+    }
+
+    if (response.status >= 400) {
+      const errorMsg = response.data?.error?.message || response.data?.error || response.data?.message || `HTTP ${response.status}`;
+      const error = new Error(`Failed to open tool session: ${typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg)}`);
+      error.response = response;
+      throw error;
+    }
+
+    const data = response.data || {};
+    if (typeof data.session_id !== 'string' || !data.session_id) {
+      throw new Error('Failed to open tool session: the server did not return a session_id');
+    }
+    return data;
+  }
+
+  /**
    * Is this URL on the configured API host (same scheme, host and port)?
    * @param {string} url
    * @returns {boolean}
