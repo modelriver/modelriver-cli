@@ -1,4 +1,5 @@
-// Uses the real file system in a temporary HOME and working directory.
+// Uses the real file system in a temporary config folder and working directory.
+// test/support/isolate-home.js also guards against touching the real ~/.modelriver.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -9,7 +10,6 @@ describe('Config files', () => {
   let cwd;
   let cwdSpy;
   let warnSpy;
-  let homeSpy;
 
   function loadConfig() {
     jest.resetModules();
@@ -25,7 +25,7 @@ describe('Config files', () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-home-'));
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'mr-cwd-'));
     process.env = { ...originalEnv };
-    homeSpy = jest.spyOn(os, 'homedir').mockReturnValue(home);
+    process.env.MODELRIVER_CONFIG_DIR = path.join(home, '.modelriver');
     delete process.env.MODELRIVER_API_KEY;
     delete process.env.MODELRIVER_API_URL;
     cwdSpy = jest.spyOn(process, 'cwd').mockReturnValue(cwd);
@@ -34,7 +34,6 @@ describe('Config files', () => {
 
   afterEach(() => {
     cwdSpy.mockRestore();
-    homeSpy.mockRestore();
     warnSpy.mockRestore();
     process.env = originalEnv;
     fs.rmSync(home, { recursive: true, force: true });
@@ -101,5 +100,52 @@ describe('Config files', () => {
     fs.writeFileSync(path.join(cwd, '.modelriverrc'), JSON.stringify({ api_key: 42 }));
     const config = loadConfig();
     expect(config.getApiKey()).toBeFalsy();
+  });
+
+  it('falls back to <home>/.modelriver when MODELRIVER_CONFIG_DIR is not set', () => {
+    delete process.env.MODELRIVER_CONFIG_DIR;
+    const homeSpy = jest.spyOn(os, 'homedir').mockReturnValue(home);
+    try {
+      const config = loadConfig();
+      expect(config.getConfigDir()).toBe(path.join(home, '.modelriver'));
+    } finally {
+      homeSpy.mockRestore();
+    }
+  });
+});
+
+describe('test isolation guard', () => {
+  // os.userInfo() reads the account database, not the patched os.homedir().
+  const realConfigDir = path.join(os.userInfo().homedir, '.modelriver');
+
+  it('makes os.homedir() throw', () => {
+    expect(() => os.homedir()).toThrow(/real home folder/);
+  });
+
+  it('points the config folder at a temp folder', () => {
+    jest.resetModules();
+    const config = require('./config');
+    expect(config.getConfigDir()).toBe(process.env.MODELRIVER_CONFIG_DIR);
+    expect(config.getConfigDir().startsWith(realConfigDir)).toBe(false);
+    expect(process.env.HOME).not.toBe(os.userInfo().homedir);
+  });
+
+  it('refuses any file access inside the real ~/.modelriver', () => {
+    const file = path.join(realConfigDir, 'config.json');
+    expect(() => fs.existsSync(file)).toThrow(/real home folder/);
+    expect(() => fs.readFileSync(file)).toThrow(/real home folder/);
+    expect(() => fs.writeFileSync(file, '{}')).toThrow(/real home folder/);
+    expect(() => fs.renameSync('/tmp/x', file)).toThrow(/real home folder/);
+    expect(() => fs.chmodSync(realConfigDir, 0o700)).toThrow(/real home folder/);
+  });
+
+  it('refuses saveConfig when the config folder resolves to the real one', () => {
+    process.env.MODELRIVER_CONFIG_DIR = realConfigDir;
+    try {
+      jest.resetModules();
+      expect(() => require('./config').saveConfig({ api_key: 'mr_live_nope_nope_nope_nope' })).toThrow(/real home folder/);
+    } finally {
+      process.env.MODELRIVER_CONFIG_DIR = path.join(os.tmpdir(), 'unused');
+    }
   });
 });

@@ -62,6 +62,9 @@
     "testPathIgnorePatterns": [
       "/node_modules/",
       "/test/support/"
+    ],
+    "setupFilesAfterEnv": [
+      "<rootDir>/test/support/isolate-home.js"
     ]
   }
 }

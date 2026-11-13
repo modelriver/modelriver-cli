@@ -77,7 +77,7 @@ modelriver t -w my-workflow -m "Hello"  # Same as: modelriver trigger ...
 modelriver login
 ```
 
-This saves your configuration to `~/.modelriver/config.json`. The file is written readable only by you (mode `0600`, folder `0700`).
+This saves your configuration to `~/.modelriver/config.json`. The file is written readable only by you (mode `0600`, folder `0700`). Set `MODELRIVER_CONFIG_DIR` to keep it in another folder.
 
 ### Environment Variables
 
@@ -564,6 +564,8 @@ Tests cover critical components including:
 - Tool forwarding: loopback-only targets (including names that resolve to public IPs), exact body and headers, timeouts and size limits
 - WebSocket client: push/reply refs, several topics, reconnect with a fresh token
 - Config file permissions and the `.modelriverrc` `api_url` rule
+
+The tests never touch your real `~/.modelriver`: `test/support/isolate-home.js` points `MODELRIVER_CONFIG_DIR` and `HOME` at a temp folder for every test file, makes `os.homedir()` throw, and fails any file access inside the real `~/.modelriver`.
 
 Tests run on Node 22.12+. chalk and ora are ESM-only, and Jest can only `require()` ESM on Node 24.9+, so the tests map them to small stand-ins in `test/support/`.
 

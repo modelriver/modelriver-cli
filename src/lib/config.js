@@ -22,7 +22,7 @@ class Config {
     }
 
     // Check for ~/.modelriver/config.json
-    const homeConfig = path.join(os.homedir(), '.modelriver', 'config.json');
+    const homeConfig = this.getHomeConfigPath();
     if (fs.existsSync(homeConfig)) {
       return homeConfig;
     }
@@ -107,19 +107,32 @@ class Config {
   }
 
   /**
-   * Get the path to the home config file
-   * @returns {string} - Path to ~/.modelriver/config.json
+   * The folder that holds config.json: MODELRIVER_CONFIG_DIR when set,
+   * otherwise ~/.modelriver. (The tests always set MODELRIVER_CONFIG_DIR.)
+   * @returns {string}
    */
-  getHomeConfigPath() {
-    return path.join(os.homedir(), '.modelriver', 'config.json');
+  getConfigDir() {
+    const override = process.env.MODELRIVER_CONFIG_DIR;
+    if (override && override.trim()) {
+      return path.resolve(override.trim());
+    }
+    return path.join(os.homedir(), '.modelriver');
   }
 
   /**
-   * Save configuration to ~/.modelriver/config.json
+   * Get the path to the home config file
+   * @returns {string} - Path to <config dir>/config.json (default ~/.modelriver/config.json)
+   */
+  getHomeConfigPath() {
+    return path.join(this.getConfigDir(), 'config.json');
+  }
+
+  /**
+   * Save configuration to <config dir>/config.json (default ~/.modelriver/config.json)
    * @param {object} configData - Configuration object to save
    */
   saveConfig(configData) {
-    const configDir = path.join(os.homedir(), '.modelriver');
+    const configDir = this.getConfigDir();
     const configPath = this.getHomeConfigPath();
 
     // The folder is readable only by you (0700), the file too (0600).
