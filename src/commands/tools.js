@@ -70,8 +70,10 @@ async function handleToolCall(call, { wsClient, topic, origin, print = false, lo
     Logger.log(`  Result: ${formatBody(result.body)}`);
   }
 
-  const reply = { reply_ref: call.reply_ref, status: result.status, body: result.body };
-  if (result.error) reply.error = result.error;
+  // The server takes either {reply_ref, status, body} or {reply_ref, error}.
+  const reply = result.error
+    ? { reply_ref: call.reply_ref, error: result.error }
+    : { reply_ref: call.reply_ref, status: result.status, body: result.body };
 
   try {
     await wsClient.push(topic, 'tool_result', reply, { timeoutMs: RESULT_PUSH_TIMEOUT_MS });
@@ -121,7 +123,10 @@ async function toolsCommand(options) {
 
     spinner.text = 'Opening tool session...';
     const session = await apiClient.createToolSession();
-    const topic = session.channel || `cli_tools:${session.session_id}`;
+    // The topic holds the session's database ID; the cts_ token is only sent
+    // in the join params, which the server checks.
+    const topic = session.channel;
+    const joinParams = { session_token: session.session_id };
 
     spinner.text = 'Connecting to WebSocket...';
     wsClient = new CLIWebSocketClient(connectResponse.websocket_url, connectResponse.ws_token, Boolean(verbose), {
@@ -132,7 +137,8 @@ async function toolsCommand(options) {
     await wsClient.connect();
 
     spinner.text = 'Joining tool channel...';
-    await wsClient.join(topic);
+    // join() keeps the params, so a rejoin after a reconnect sends them again.
+    await wsClient.join(topic, joinParams);
 
     spinner.succeed('Tool forwarding active');
 

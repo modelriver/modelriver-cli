@@ -86,13 +86,13 @@ describe('tools command: handleToolCall', () => {
   it('sends the error code with status 0 on timeout', async () => {
     const wsClient = fakeWs();
     await handleToolCall(call({ path: '/slow', timeout_ms: 100 }), { wsClient, topic: 't', origin });
-    expect(wsClient.push.mock.calls[0][2]).toEqual({ reply_ref: 'rr_9', status: 0, body: null, error: 'timeout' });
+    expect(wsClient.push.mock.calls[0][2]).toEqual({ reply_ref: 'rr_9', error: 'timeout' });
   });
 
   it('sends too_large when the response is over max_result_bytes', async () => {
     const wsClient = fakeWs();
     await handleToolCall(call({ max_result_bytes: 10 }), { wsClient, topic: 't', origin });
-    expect(wsClient.push.mock.calls[0][2]).toMatchObject({ reply_ref: 'rr_9', body: null, error: 'too_large' });
+    expect(wsClient.push.mock.calls[0][2]).toEqual({ reply_ref: 'rr_9', error: 'too_large' });
   });
 
   it('sends target_refused without making a request when the target is not loopback', async () => {
@@ -100,7 +100,7 @@ describe('tools command: handleToolCall', () => {
     const lookup = jest.fn(async () => [{ address: '203.0.113.7', family: 4 }]);
     await handleToolCall(call(), { wsClient, topic: 't', origin: 'http://tools.example.com:3000', lookup });
     expect(received).toBeNull();
-    expect(wsClient.push.mock.calls[0][2]).toEqual({ reply_ref: 'rr_9', status: 0, body: null, error: 'target_refused' });
+    expect(wsClient.push.mock.calls[0][2]).toEqual({ reply_ref: 'rr_9', error: 'target_refused' });
   });
 
   it('logs, but does not throw, when the server refuses the result', async () => {

@@ -164,11 +164,33 @@ describe('CLIWebSocketClient', () => {
     expect(webhooks[0]).toEqual({ channel_id: 'ch' });
   });
 
+  it('sends the join params (session_token) in phx_join, and again on rejoin after a reconnect', async () => {
+    const refreshToken = jest.fn(async () => ({ ws_token: 'tok-2' }));
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10 });
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    await client.connect();
+    await client.join('cli_tools:6f1d-uuid', { session_token: 'cts_secret_token' });
+
+    const firstJoin = server.messages.find((m) => m.event === 'phx_join');
+    expect(firstJoin).toMatchObject({ topic: 'cli_tools:6f1d-uuid', payload: { session_token: 'cts_secret_token' } });
+
+    const reconnected = new Promise((resolve) => client.onClient('reconnect', resolve));
+    server.connections[0].terminate();
+    await reconnected;
+    await waitFor(() => server.messages.filter((m) => m.event === 'phx_join').length === 2);
+
+    const rejoin = server.messages.filter((m) => m.event === 'phx_join')[1];
+    expect(rejoin).toMatchObject({ topic: 'cli_tools:6f1d-uuid', payload: { session_token: 'cts_secret_token' } });
+    expect(server.tokens).toEqual(['tok-1', 'tok-2']);
+    log.mockRestore();
+  });
+
   it('reports a refused join with the server reason', async () => {
-    server.onMessage = (msg, socket) => reply(socket, msg, 'error', { reason: 'session_expired' });
+    server.onMessage = (msg, socket) => reply(socket, msg, 'error', { reason: 'unauthorized' });
     client = new CLIWebSocketClient(server.url, 'tok');
     await client.connect();
-    await expect(client.join('cli_tools:s1')).rejects.toThrow('Failed to join channel: session_expired');
+    await expect(client.join('cli_tools:s1', { session_token: 'cts_x' })).rejects.toThrow('Failed to join channel: unauthorized');
     expect(client.topics.size).toBe(0);
   });
 

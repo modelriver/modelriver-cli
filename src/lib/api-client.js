@@ -170,7 +170,7 @@ class ApiClient {
   /**
    * Open a CLI tool session. Tool calls for this session are sent to the CLI
    * over the WebSocket channel the response names.
-   * @returns {Promise<object>} - {session_id, expires_at, channel}
+   * @returns {Promise<object>} - {session_id (the cts_ token), channel, expires_at, project_id}
    */
   async createToolSession() {
     const url = `${this.apiPath}/cli/tool-sessions`;
@@ -188,7 +188,7 @@ class ApiClient {
     }
 
     if (response.status >= 400) {
-      const errorMsg = response.data?.error?.message || response.data?.error || response.data?.message || `HTTP ${response.status}`;
+      const errorMsg = response.data?.message || response.data?.error?.message || response.data?.error || `HTTP ${response.status}`;
       const error = new Error(`Failed to open tool session: ${typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg)}`);
       error.response = response;
       throw error;
@@ -197,6 +197,9 @@ class ApiClient {
     const data = response.data || {};
     if (typeof data.session_id !== 'string' || !data.session_id) {
       throw new Error('Failed to open tool session: the server did not return a session_id');
+    }
+    if (typeof data.channel !== 'string' || !data.channel.startsWith('cli_tools:')) {
+      throw new Error('Failed to open tool session: the server did not return a cli_tools channel');
     }
     return data;
   }
