@@ -152,6 +152,14 @@ describe('checkApiUrl', () => {
 
   it('accepts http only for localhost, 127.0.0.0/8 and ::1 (the hosts ws:// is allowed for)', () => {
     expect(checkApiUrl('http://localhost:4000')).toBe('http://localhost:4000');
+  });
+
+  it('cuts an API path the CLI adds itself back to the base URL', () => {
+    expect(checkApiUrl('http://localhost:4000/api')).toBe('http://localhost:4000');
+    expect(checkApiUrl('http://localhost:4000/api/')).toBe('http://localhost:4000');
+    expect(checkApiUrl('http://localhost:4000/api/v1')).toBe('http://localhost:4000');
+    expect(checkApiUrl('https://api.modelriver.com/v1')).toBe('https://api.modelriver.com');
+    expect(checkApiUrl('https://staging.example.com/modelriver')).toBe('https://staging.example.com/modelriver');
     expect(checkApiUrl('http://127.0.0.1:4000')).toBe('http://127.0.0.1:4000');
     expect(checkApiUrl('http://[::1]:4000')).toBe('http://[::1]:4000');
     expect(() => checkApiUrl('http://10.0.0.1:4000')).toThrow(/must use https/);

@@ -120,6 +120,22 @@ class Config {
     return this.get('project-id') || this.get('project_id');
   }
 
+  /**
+   * The API URL saved by `modelriver login` in <config dir>/config.json, or
+   * null. Unlike getApiUrl(), it ignores MODELRIVER_API_URL, so login can
+   * show what is saved and warn when the variable overrides it.
+   * @returns {string|null}
+   */
+  getSavedApiUrl() {
+    try {
+      const home = JSON.parse(fs.readFileSync(this.getHomeConfigPath(), 'utf8'));
+      const url = home && typeof home === 'object' ? (home.api_url || home['api-url']) : null;
+      return typeof url === 'string' && url.trim() ? url.trim() : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   getApiUrl() {
     return this.get('api-url', 'https://api.modelriver.com') || this.get('api_url', 'https://api.modelriver.com');
   }

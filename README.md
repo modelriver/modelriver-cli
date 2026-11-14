@@ -652,6 +652,16 @@ The CLI uses these ModelRiver API endpoints:
 
 ## Development
 
+### Pointing the CLI at a local ModelRiver server
+
+For working on ModelRiver itself: save your local server's URL once, and every command uses it.
+
+```bash
+modelriver login --api-url http://localhost:4000
+```
+
+`--api-url` isn't listed in `modelriver login --help`. Only https URLs, or http to localhost, 127.0.0.0/8 or ::1, are accepted. `MODELRIVER_API_URL` or `--api-url` on a command still override the saved URL. To go back to production, run `modelriver login --api-url https://api.modelriver.com`.
+
 ### Running Tests
 
 The CLI includes a Jest test suite. To run the tests:
@@ -671,6 +681,7 @@ Tests cover critical components including:
 - The v2 tool signature, against the documented test value
 - WebSocket client: push/reply refs, several topics, reconnect with a fresh token
 - Config file permissions and the `.modelriverrc` `api_url` rule
+- `modelriver login`: what it asks, the saved `--api-url`, and the Quick Start
 
 The tests never touch your real `~/.modelriver`: `test/support/isolate-home.js` points `MODELRIVER_CONFIG_DIR` and `HOME` at a temp folder for every test file, makes `os.homedir()` throw, and fails any file access inside the real `~/.modelriver`.
 

@@ -1,7 +1,8 @@
 const readline = require('readline');
 const config = require('../lib/config');
 const Logger = require('../utils/logger');
-const { normalizeWebhookUrl, isValidApiKeyFormat } = require('../utils/url-helpers');
+const { normalizeWebhookUrl, isValidApiKeyFormat, checkApiUrl } = require('../utils/url-helpers');
+
 const { maskSecret } = require('../utils/secrets');
 
 /**
@@ -51,7 +52,10 @@ function prompt(rl, question, defaultValue = '', maskDefault = false, showDefaul
 
 /**
  * Interactive login command
- * Prompts for API key and forward URL, saves to config
+ * Prompts for the API key and the webhook forward URL, and saves them to
+ * config.json. `--api-url` (for ModelRiver's own developers, pointing the CLI
+ * at a local server) is saved too, so later commands use it without the flag
+ * or MODELRIVER_API_URL; nobody is asked for it.
  */
 async function loginCommand(options) {
     const rl = createReadlineInterface();
@@ -63,13 +67,17 @@ async function loginCommand(options) {
     try {
         // Get current values for defaults
         const currentApiKey = config.getApiKey();
+        const currentApiUrl = config.getSavedApiUrl();
         const currentForwardUrl = config.getForwardUrl();
 
         // Show current config if exists
-        if (currentApiKey || currentForwardUrl) {
+        if (currentApiKey || currentApiUrl || currentForwardUrl) {
             Logger.info('Current configuration:');
             if (currentApiKey) {
                 Logger.info(`  API Key: ${maskSecret(currentApiKey)}`);
+            }
+            if (currentApiUrl) {
+                Logger.info(`  API URL: ${currentApiUrl}`);
             }
             if (currentForwardUrl) {
                 Logger.info(`  Forward URL: ${currentForwardUrl}`);
@@ -84,6 +92,12 @@ async function loginCommand(options) {
             Logger.warning(`Current env value: ${maskSecret(process.env.MODELRIVER_API_KEY)}`);
             Logger.warning('To use the key you are about to save, you must unset this variable:');
             Logger.warning('  unset MODELRIVER_API_KEY');
+            console.log('');
+        }
+
+        if (process.env.MODELRIVER_API_URL && (currentApiUrl || (options && options.apiUrl))) {
+            Logger.warning(`WARNING: MODELRIVER_API_URL is set (${process.env.MODELRIVER_API_URL}).`);
+            Logger.warning('It overrides the API URL you save here. To use the saved one: unset MODELRIVER_API_URL');
             console.log('');
         }
 
@@ -110,6 +124,18 @@ async function loginCommand(options) {
             process.exit(1);
         }
 
+        // Only saved when --api-url is given; an earlier saved one is kept.
+        let apiUrl = null;
+        if (options && options.apiUrl) {
+            try {
+                apiUrl = checkApiUrl(options.apiUrl.trim());
+            } catch (error) {
+                Logger.error(error.message);
+                rl.close();
+                process.exit(1);
+            }
+        }
+
         // Prompt for forward URL
         // Default to the CLI local receiver port (3001), not ModelRiver API (4000).
         const defaultForwardUrl = currentForwardUrl || 'http://localhost:3001/webhook/modelriver';
@@ -133,7 +159,8 @@ async function loginCommand(options) {
         try {
             config.saveConfig({
                 api_key: apiKey,
-                forward_url: forwardUrl
+                forward_url: forwardUrl,
+                ...(apiUrl ? { api_url: apiUrl } : {})
             });
 
             spinner.succeed('Configuration saved!');
@@ -142,6 +169,8 @@ async function loginCommand(options) {
             // Display saved configuration
             Logger.section('Saved Configuration');
             Logger.success(`API Key: ${maskSecret(apiKey)}`);
+            const savedApiUrl = apiUrl || currentApiUrl;
+            if (savedApiUrl) Logger.success(`API URL: ${savedApiUrl}`);
             Logger.success(`Forward URL: ${forwardUrl}`);
             Logger.info(`Config file: ${config.getHomeConfigPath()}`);
 
@@ -152,6 +181,13 @@ async function loginCommand(options) {
             console.log('');
             Logger.info('Or use listen with print:');
             console.log('  modelriver listen --print');
+            console.log('');
+            Logger.info('Test hosted tools on this machine (calls go to the same path on your server):');
+            console.log('  modelriver tools --forward-to http://localhost:3000');
+            console.log('');
+            Logger.info('Approve or decline a tool call that waits for approval:');
+            console.log('  modelriver tools show <call_id>');
+            console.log('  modelriver tools approve <call_id> --end-user <id>');
             console.log('');
             Logger.info('Other useful commands:');
             console.log('  modelriver trigger -w my-workflow -m "Hello"');

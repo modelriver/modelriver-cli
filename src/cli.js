@@ -1,4 +1,4 @@
-const { Command } = require('commander');
+const { Command, Option } = require('commander');
 const config = require('./lib/config');
 const { version } = require('../package.json');
 
@@ -64,7 +64,9 @@ function createProgram(actions = defaultActions()) {
   program
     .command('login')
     .description('Configure your ModelRiver API key and forward URL interactively')
-    .action((options) => actions.login(options));
+    // For ModelRiver's own developers: save a local server's URL. Not listed.
+    .addOption(new Option('--api-url <url>').hideHelp())
+    .action((options) => actions.login({ ...options, apiUrl: options.apiUrl || program.opts().apiUrl }));
 
   // Listen command with alias 'l'
   withApiOptions(program

@@ -135,11 +135,23 @@ function isLocalApiHost(hostname) {
 /**
  * Check an API base URL. It must be https, except for localhost,
  * 127.0.0.0/8 and ::1, which may use http.
+ *
+ * The CLI adds the API path itself (/v1, or /api/v1 off modelriver.com), so a
+ * URL saved or given with that path (`http://localhost:4000/api`) is cut back
+ * to the base; otherwise requests would go to /api/api/v1/… and be refused.
  * @param {string} apiUrl
- * @returns {string} the URL without a trailing slash
+ * @returns {string} the base URL, without a trailing slash or API path
  * @throws {Error} when the URL is invalid or uses http for another host
  */
 function checkApiUrl(apiUrl) {
+    return stripApiPath(checkApiUrlScheme(apiUrl));
+}
+
+function stripApiPath(apiUrl) {
+    return apiUrl.replace(/\/(?:api\/v1|api|v1)\/?$/, '').replace(/\/$/, '');
+}
+
+function checkApiUrlScheme(apiUrl) {
     let url;
     try {
         url = new URL(apiUrl);
