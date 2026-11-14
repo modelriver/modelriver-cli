@@ -76,7 +76,9 @@ async function loginCommand(options) {
             console.log('');
         }
         const currentApiUrl = config.getSavedApiUrl();
-        const currentForwardUrl = config.getForwardUrl();
+        // Like the key: a .modelriverrc's forward URL is not offered, since
+        // Enter would save it to config.json, used in every folder.
+        const currentForwardUrl = config.getSavedForwardUrl();
 
         // Show current config if exists
         if (currentApiKey || currentApiUrl || currentForwardUrl) {

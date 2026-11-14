@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const config = require('./config');
 
@@ -10,14 +11,30 @@ const FILE_NAME = 'tool-sessions.json';
 // opened instead, so a restarted CLI doesn't run on a session about to end.
 const REUSE_MIN_REMAINING_MS = 60 * 60 * 1000;
 // Every read-modify-write of the file holds <file>.lock (created with O_EXCL),
-// so several CLIs writing at once don't lose each other's records.
-const LOCK_STALE_MS = 10 * 1000; // a lock this old was left by a crashed CLI
-const LOCK_TIMEOUT_MS = 5 * 1000;
+// so several CLIs writing at once don't lose each other's records. A lock is
+// held for a few milliseconds. One whose CLI is gone (same machine) is taken
+// over at once; one this old is taken over too (a CLI on another machine
+// sharing the folder, or a process id the system has reused).
+const LOCK_STALE_MS = 5 * 1000;
+// Longer than LOCK_STALE_MS, so a stale lock is always taken over before a
+// CLI gives up waiting.
+const LOCK_TIMEOUT_MS = 6 * 1000;
 const LOCK_RETRY_MIN_MS = 5;
 const LOCK_RETRY_MAX_MS = 100;
 
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Whether a process with this id is running on this machine. */
+function processAlive(pid) {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM'; // running, as another user
+  }
 }
 // How many forwarded call ids are kept per session (oldest forgotten first).
 const FORWARDED_LIMIT = 1000;
@@ -76,12 +93,15 @@ class ToolSessionStore {
   /**
    * Run fn while holding the lock file, so no other CLI reads or writes the
    * session file in between. Works across processes: the lock is created
-   * with O_EXCL. A lock older than LOCK_STALE_MS is taken over.
+   * with O_EXCL. A stale lock (see LOCK_STALE_MS) is taken over.
    * @param {Function} fn
    * @returns {*} fn's result
    */
   withLock(fn) {
     this.ensureDir();
+    // Written in the lock: who holds it, so a crashed holder is seen at once,
+    // and a random part, so a CLI only ever removes its own lock.
+    const token = `${process.pid} ${os.hostname()} ${crypto.randomBytes(8).toString('hex')}`;
     const deadline = Date.now() + this.lockTimeoutMs;
     let wait = LOCK_RETRY_MIN_MS;
     for (;;) {
@@ -100,48 +120,95 @@ class ToolSessionStore {
       }
 
       try {
-        fs.writeSync(fd, `${process.pid}\n`);
-      } finally {
-        fs.closeSync(fd);
+        try {
+          fs.writeSync(fd, `${token}\n`);
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch (error) {
+        // A full disk, say: the lock must not stay behind, held by no one.
+        try { fs.unlinkSync(this.lockFile); } catch (unlinkError) { /* already gone */ }
+        throw error;
       }
       try {
         return fn();
       } finally {
-        try { fs.unlinkSync(this.lockFile); } catch (error) { /* already gone */ }
+        this.releaseLock(token);
       }
     }
   }
 
   /**
-   * Remove the lock file if it is stale. It is first moved aside and checked
-   * again, so a lock another CLI took a moment ago is not removed by mistake.
-   * @returns {boolean} true when a stale lock was removed
+   * Remove the lock if it is still this CLI's. If this CLI was paused long
+   * enough for its lock to be taken over, the lock there now is another's.
+   * @param {string} token
+   */
+  releaseLock(token) {
+    try {
+      const lock = this.readLock();
+      if (lock && lock.token === token) fs.unlinkSync(this.lockFile);
+    } catch (error) {
+      // Gone already, or unreadable: it is taken over once stale.
+    }
+  }
+
+  /** @returns {{token: string, mtimeMs: number}|null} the lock, or null when there is none */
+  readLock() {
+    try {
+      const { mtimeMs } = fs.statSync(this.lockFile);
+      return { token: fs.readFileSync(this.lockFile, 'utf8').trim(), mtimeMs };
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Whether a lock was left behind: its CLI's process is gone (a lock
+   * written on this machine), or it is older than LOCK_STALE_MS. A lock
+   * just created, before its holder wrote in it, is new, so not stale.
+   */
+  isStale({ token, mtimeMs }) {
+    if (Date.now() - mtimeMs >= LOCK_STALE_MS) return true;
+    const [pid, host] = token.split(' ');
+    if (host === os.hostname() && /^\d+$/.test(pid || '')) return !processAlive(Number(pid));
+    return false;
+  }
+
+  /**
+   * Remove the lock if it is stale. One CLI at a time does this (it holds
+   * <lock>.takeover meanwhile) and checks again that the lock is still the
+   * same stale one, so a lock another CLI has just taken is never removed.
+   * @returns {boolean} true when the lock is gone and taking it can be tried again
    */
   removeStaleLock() {
-    let stat;
-    try {
-      stat = fs.statSync(this.lockFile);
-    } catch (error) {
-      return error.code === 'ENOENT'; // released meanwhile: try again now
-    }
-    if (Date.now() - stat.mtimeMs < LOCK_STALE_MS) return false;
+    const seen = this.readLock();
+    if (!seen) return true; // released meanwhile: try again now
+    if (!this.isStale(seen)) return false;
 
-    const aside = `${this.lockFile}.stale.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
+    const takeover = `${this.lockFile}.takeover`;
+    let fd;
     try {
-      fs.renameSync(this.lockFile, aside);
+      fd = fs.openSync(takeover, 'wx', CONFIG_FILE_MODE);
     } catch (error) {
-      return error.code === 'ENOENT';
+      if (error.code !== 'EEXIST') throw error;
+      // Another CLI is taking it over. One that crashed while doing so
+      // leaves this file: it is removed once it is old.
+      try {
+        if (Date.now() - fs.statSync(takeover).mtimeMs >= LOCK_STALE_MS) fs.unlinkSync(takeover);
+      } catch (statError) { /* gone meanwhile */ }
+      return false;
     }
+    fs.closeSync(fd);
     try {
-      const moved = fs.statSync(aside);
-      if (moved.ino !== stat.ino) {
-        // Another CLI replaced the stale lock with its own in between: put it back.
-        try { fs.linkSync(aside, this.lockFile); } catch (error) { /* a newer lock exists */ }
-      }
+      const now = this.readLock();
+      if (!now) return true;
+      if (now.token !== seen.token || !this.isStale(now)) return false;
+      fs.unlinkSync(this.lockFile);
+      return true;
     } finally {
-      try { fs.unlinkSync(aside); } catch (error) { /* already gone */ }
+      try { fs.unlinkSync(takeover); } catch (error) { /* already gone */ }
     }
-    return true;
   }
 
   /**

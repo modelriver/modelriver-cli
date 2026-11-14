@@ -30,6 +30,11 @@ describe('tool approvals: showing calls as plain text', () => {
     ['U+FEFF zero-width no-break space', '\ufeff'],
     ['U+2060 word joiner', '\u2060'],
     ['U+061C Arabic letter mark', '\u061c'],
+    ['U+00AD soft hyphen', '\u00ad'],
+    ['U+034F combining grapheme joiner', '\u034f'],
+    ['U+180E Mongolian vowel separator', '\u180e'],
+    ['U+3164 Hangul filler', '\u3164'],
+    ['U+FFA0 halfwidth Hangul filler', '\uffa0'],
   ])('escapes the hidden or bidi character %s', (_label, ch) => {
     const code = ch.charCodeAt(0).toString(16).padStart(4, '0');
     expect(plainText(`pay${ch}100`)).toBe(`pay\\u${code}100`);
@@ -42,8 +47,13 @@ describe('tool approvals: showing calls as plain text', () => {
     expect(formatArguments({ note: '\u2066hidden\u2069' })).toEqual(['  note: \\u2066hidden\\u2069']);
   });
 
+  it('escapes tag characters, which can hide text, by their code point', () => {
+    expect(plainText('ok\u{e0041}\u{e007f}')).toBe('ok\\u{e0041}\\u{e007f}');
+  });
+
   it('leaves ordinary non-ASCII text alone', () => {
     expect(plainText('Zürich — 東京 — مرحبا ✓')).toBe('Zürich — 東京 — مرحبا ✓');
+    expect(plainText('done ✔️ 👍🏽')).toBe('done ✔️ 👍🏽');
   });
 
   it('shows non-text values as JSON', () => {

@@ -110,6 +110,21 @@ describe('Config files', () => {
     expect(config.getApiUrl()).toBe('https://env.modelriver.com');
   });
 
+  it('offers login only a saved or environment forward URL, never a .modelriverrc one', () => {
+    fs.writeFileSync(path.join(cwd, '.modelriverrc'), JSON.stringify({ forward_url: 'https://elsewhere.example.com/hook' }));
+    const config = loadConfig();
+    expect(config.getForwardUrl()).toBe('https://elsewhere.example.com/hook'); // still used in this folder
+    expect(config.getSavedForwardUrl()).toBeNull();
+
+    const dir = path.join(home, '.modelriver');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ forward_url: 'http://localhost:3001/hook' }));
+    expect(loadConfig().getSavedForwardUrl()).toBe('http://localhost:3001/hook');
+
+    process.env.MODELRIVER_FORWARD_URL = 'http://localhost:4444/hook';
+    expect(loadConfig().getSavedForwardUrl()).toBe('http://localhost:4444/hook');
+  });
+
   it('uses the API URL that saveConfig (login --api-url) just wrote, with a .modelriverrc present', () => {
     fs.writeFileSync(path.join(cwd, '.modelriverrc'), JSON.stringify({ forward_url: 'http://localhost:5000' }));
     const config = loadConfig();

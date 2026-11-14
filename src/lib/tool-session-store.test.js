@@ -176,7 +176,7 @@ describe('ToolSessionStore', () => {
       expect(fs.readdirSync(dir).filter((f) => f.includes('.tmp') || f.includes('.stale'))).toEqual([]);
     }, 30000);
 
-    it('takes over a lock left by a crashed CLI (older than 10 s)', () => {
+    it('takes over a lock left by a crashed CLI (older than 5 s)', () => {
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(store.lockFile, '99999\n');
       const old = (Date.now() - 20 * 1000) / 1000;
@@ -185,6 +185,65 @@ describe('ToolSessionStore', () => {
       store.save(keyOf(), session());
       expect(store.load(keyOf())).not.toBeNull();
       expect(fs.existsSync(store.lockFile)).toBe(false);
+    });
+
+    it('takes over at once a lock whose CLI is gone from this machine', () => {
+      fs.mkdirSync(dir, { recursive: true });
+      // A process id that is no longer running.
+      const { pid } = require('child_process').spawnSync(process.execPath, ['-e', '0']);
+      fs.writeFileSync(store.lockFile, `${pid} ${os.hostname()} 0123456789abcdef\n`);
+
+      const quick = new ToolSessionStore({ dir, now: () => now, lockTimeoutMs: 150 });
+      quick.save(keyOf(), session());
+      expect(quick.load(keyOf())).not.toBeNull();
+      expect(fs.existsSync(store.lockFile)).toBe(false);
+    });
+
+    it('never takes over a new lock whose CLI is still running', () => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(store.lockFile, `${process.ppid} ${os.hostname()} 0123456789abcdef\n`);
+
+      const waiting = new ToolSessionStore({ dir, now: () => now, lockTimeoutMs: 150 });
+      expect(() => waiting.save(keyOf(), session())).toThrow(/Timed out waiting/);
+      expect(fs.readFileSync(store.lockFile, 'utf8')).toContain(`${process.ppid} `);
+    });
+
+    it('removes only its own lock: one taken over meanwhile stays', () => {
+      store.withLock(() => {
+        // As if this CLI was paused long enough for another to take its lock.
+        fs.writeFileSync(store.lockFile, `1 another-machine fedcba9876543210\n`);
+      });
+      expect(fs.readFileSync(store.lockFile, 'utf8')).toContain('another-machine');
+    });
+
+    it('leaves no lock behind when it cannot write in it (a full disk)', () => {
+      const spy = jest.spyOn(fs, 'writeSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      });
+      try {
+        expect(() => store.save(keyOf(), session())).toThrow(/ENOSPC/);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(fs.existsSync(store.lockFile)).toBe(false);
+
+      const started = Date.now();
+      store.save(keyOf(), session());
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(store.load(keyOf())).not.toBeNull();
+    });
+
+    it('clears a takeover left by a CLI that crashed while taking a stale lock over', () => {
+      fs.mkdirSync(dir, { recursive: true });
+      const old = (Date.now() - 20 * 1000) / 1000;
+      fs.writeFileSync(store.lockFile, '99999\n');
+      fs.utimesSync(store.lockFile, old, old);
+      fs.writeFileSync(`${store.lockFile}.takeover`, '');
+      fs.utimesSync(`${store.lockFile}.takeover`, old, old);
+
+      store.save(keyOf(), session());
+      expect(store.load(keyOf())).not.toBeNull();
+      expect(fs.readdirSync(dir).filter((f) => f.includes('.lock'))).toEqual([]);
     });
 
     it('waits for a lock another CLI holds, then gives up with a clear error', () => {

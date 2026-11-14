@@ -153,6 +153,24 @@ class Config {
     return this.get('forward-url') || this.get('forward_url');
   }
 
+  /**
+   * MODELRIVER_FORWARD_URL, else the forward URL saved in
+   * <config dir>/config.json, or null. Never a .modelriverrc's: login offers
+   * it as the default and saves it to config.json, used in every folder.
+   * @returns {string|null}
+   */
+  getSavedForwardUrl() {
+    const fromEnv = process.env.MODELRIVER_FORWARD_URL && process.env.MODELRIVER_FORWARD_URL.trim();
+    if (fromEnv) return fromEnv;
+    try {
+      const home = JSON.parse(fs.readFileSync(this.getHomeConfigPath(), 'utf8'));
+      const url = home && typeof home === 'object' ? (home.forward_url || home['forward-url']) : null;
+      return typeof url === 'string' && url.trim() ? url.trim() : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
   getWebSocketUrl() {
     const apiUrl = this.getApiUrl();
     // Convert http:// to ws:// and https:// to wss://

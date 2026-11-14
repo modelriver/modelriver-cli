@@ -12,10 +12,13 @@ const APPROVAL_RESUME_MARGIN_MS = 5 * 60 * 1000;
 // C0 controls except tab and new line, DEL, C1 controls, the Unicode line and
 // paragraph separators, and invisible or direction-changing characters that
 // could make approval text read differently from what it says: zero-width
-// characters and marks (U+200B-U+200F, U+2060-U+2064, U+FEFF, U+061C) and
-// bidi embeddings, overrides and isolates (U+202A-U+202E, U+2066-U+2069).
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+// characters and marks (U+200B-U+200F, U+2060-U+2064, U+FEFF, U+061C), bidi
+// embeddings, overrides and isolates (U+202A-U+202E, U+2066-U+2069), other
+// characters that show as nothing (soft hyphen U+00AD, U+034F, U+180E, the
+// Hangul fillers U+115F, U+1160, U+3164, U+FFA0) and tag characters
+// (U+E0000-U+E007F), which can hide text.
+// eslint-disable-next-line no-control-regex, no-misleading-character-class
+const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufeff\uffa0\u{e0000}-\u{e007f}]/gu;
 
 /**
  * Show a value as plain text. Text the model or the tool wrote must not be
@@ -38,9 +41,10 @@ function plainText(value) {
       text = String(value);
     }
   }
-  return text.replace(CONTROL_CHARS, (ch) =>
-    `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`
-  );
+  return text.replace(CONTROL_CHARS, (ch) => {
+    const code = ch.codePointAt(0);
+    return code > 0xffff ? `\\u{${code.toString(16)}}` : `\\u${code.toString(16).padStart(4, '0')}`;
+  });
 }
 
 /**
