@@ -9,10 +9,13 @@
 const MAX_APPROVAL_WAIT_MS = 60 * 60 * 1000;
 const APPROVAL_RESUME_MARGIN_MS = 5 * 60 * 1000;
 
-// C0 controls except tab and new line, DEL, C1 controls, and the Unicode
-// line and paragraph separators.
+// C0 controls except tab and new line, DEL, C1 controls, the Unicode line and
+// paragraph separators, and invisible or direction-changing characters that
+// could make approval text read differently from what it says: zero-width
+// characters and marks (U+200B-U+200F, U+2060-U+2064, U+FEFF, U+061C) and
+// bidi embeddings, overrides and isolates (U+202A-U+202E, U+2066-U+2069).
 // eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/g;
+const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
 
 /**
  * Show a value as plain text. Text the model or the tool wrote must not be

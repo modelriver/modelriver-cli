@@ -6,7 +6,8 @@
 //   processes the tests spawn inherit both), and MODELRIVER_* settings from
 //   the shell are cleared;
 // - os.homedir() throws, so nothing can fall back to the real home folder;
-// - any fs call on a path inside the real ~/.modelriver throws.
+// - any fs call on a path inside the real ~/.modelriver throws;
+// - child processes started without an env get the test's environment.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -82,6 +83,29 @@ function guard(target, label) {
 
 guard(fs, 'fs');
 guard(fs.promises, 'fs.promises');
+
+// In Jest, process.env above is the test's own copy: a child process started
+// without an `env` option would get the worker's real environment (real HOME,
+// no MODELRIVER_CONFIG_DIR) and could read or write the real ~/.modelriver.
+// So every child_process call without an env gets this test's environment.
+const childProcess = require('child_process');
+const testProcess = process;
+for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork']) {
+  const original = childProcess[name].__withoutTestEnv || childProcess[name];
+  const wrapped = function withTestEnv(...args) {
+    // Options come after the command and an optional argument array.
+    const at = Array.isArray(args[1]) ? 2 : 1;
+    const options = args[at];
+    if (options && typeof options === 'object') {
+      if (!options.env) args[at] = { ...options, env: testProcess.env };
+    } else {
+      args.splice(at, 0, { env: testProcess.env });
+    }
+    return original.apply(this, args);
+  };
+  wrapped.__withoutTestEnv = original;
+  childProcess[name] = wrapped;
+}
 
 afterAll(() => {
   fs.rmSync(tempHome, { recursive: true, force: true });

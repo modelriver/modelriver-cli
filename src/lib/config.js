@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const DEFAULT_API_URL = 'https://api.modelriver.com';
 const CONFIG_DIR_MODE = 0o700;
 const CONFIG_FILE_MODE = 0o600;
 // Keys a .modelriverrc in the current directory may not set. A checked-out
@@ -136,8 +137,16 @@ class Config {
     }
   }
 
+  /**
+   * MODELRIVER_API_URL, else the URL saved in <config dir>/config.json, else
+   * production. Read from config.json even when a .modelriverrc is in use
+   * (the rc may not set it), so `login --api-url` works in any folder.
+   * @returns {string}
+   */
   getApiUrl() {
-    return this.get('api-url', 'https://api.modelriver.com') || this.get('api_url', 'https://api.modelriver.com');
+    const fromEnv = process.env.MODELRIVER_API_URL && process.env.MODELRIVER_API_URL.trim();
+    if (fromEnv) return fromEnv;
+    return this.getSavedApiUrl() || DEFAULT_API_URL;
   }
 
   getForwardUrl() {

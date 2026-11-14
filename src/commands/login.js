@@ -65,8 +65,16 @@ async function loginCommand(options) {
     console.log('Configure your ModelRiver CLI credentials.\n');
 
     try {
-        // Get current values for defaults
-        const currentApiKey = config.getApiKey();
+        // Get current values for defaults. The key comes only from
+        // MODELRIVER_API_KEY or config.json, never from a .modelriverrc in this
+        // folder: pressing Enter would save a cloned repository's key to
+        // config.json, which "modelriver tools" trusts.
+        const trusted = config.getTrustedApiKey();
+        const currentApiKey = trusted ? trusted.key : null;
+        if (config.getLocalRcApiKey()) {
+            Logger.warning(`Ignoring the API key in ${config.getLocalRcPath()}; it is not offered as the default.`);
+            console.log('');
+        }
         const currentApiUrl = config.getSavedApiUrl();
         const currentForwardUrl = config.getForwardUrl();
 

@@ -451,6 +451,33 @@ function resolveApiKey(flagKey, cfg = config) {
   throw new Error('API key is required. Set MODELRIVER_API_KEY, use --api-key, or run "modelriver login".');
 }
 
+// setTimeout can't wait longer than this (about 24.8 days).
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * Call onExpired once expiresAt has passed.
+ * @param {string} expiresAt - ISO 8601 time
+ * @param {Function} onExpired
+ * @param {object} [options] - {now} for tests
+ * @returns {Function|null} cancel, or null when expiresAt can't be read
+ */
+function watchExpiry(expiresAt, onExpired, { now = Date.now } = {}) {
+  const at = Date.parse(expiresAt);
+  if (!Number.isFinite(at)) return null;
+  let timer = null;
+  const check = () => {
+    const left = at - now();
+    if (left <= 0) {
+      timer = null;
+      onExpired();
+      return;
+    }
+    timer = setTimeout(check, Math.min(left, MAX_TIMER_MS));
+  };
+  check();
+  return () => clearTimeout(timer);
+}
+
 /**
  * modelriver tools --forward-to <url> [--print]
  *
@@ -536,6 +563,8 @@ async function toolsCommand(options) {
     });
     await wsClient.connect();
 
+    // The session whose record this CLI may change in the session file.
+    let ownSessionId = saved ? saved.session_id : session.session_id;
     let warnedNotSaved = false;
     const relay = new ToolCallRelay({
       wsClient,
@@ -547,7 +576,7 @@ async function toolsCommand(options) {
       forwarded: saved ? saved.forwarded : [],
       onForward: (callId) => {
         try {
-          store.addForwarded(storeKey, callId);
+          store.addForwarded(storeKey, callId, ownSessionId);
         } catch (error) {
           if (!warnedNotSaved) {
             warnedNotSaved = true;
@@ -584,7 +613,10 @@ async function toolsCommand(options) {
         // Forgotten only once a new session exists. If opening one fails too
         // (hosted tools is off for the organization, say), the saved session
         // is kept, so it can be rejoined when that is put right.
-        try { store.remove(storeKey); } catch (removeError) { /* nothing saved to remove */ }
+        // Only if it is still the one this CLI tried: another CLI with
+        // --new-session may have saved a newer one under the same key.
+        try { store.remove(storeKey, saved.session_id); } catch (removeError) { /* nothing saved to remove */ }
+        ownSessionId = session.session_id;
         relay.topic = session.channel;
         relay.seenCallIds.clear();
       }
@@ -610,7 +642,7 @@ async function toolsCommand(options) {
     wsClient.onClient('rejoin_error', (failedTopic, error) => {
       if (failedTopic !== topic) return;
       if (refusalReason(error) === 'unauthorized') {
-        try { store.remove(storeKey); } catch (removeError) { /* nothing saved to remove */ }
+        try { store.remove(storeKey, session.session_id); } catch (removeError) { /* nothing saved to remove */ }
       }
       fail(joinRefusedHint(error) ||
         `Could not rejoin the tool session (${error.message}). It may have expired; run "modelriver tools" again.`);
@@ -679,6 +711,13 @@ async function toolsCommand(options) {
     }
     Logger.warning('> Press Ctrl+C to stop\n');
 
+    // At expires_at the session stops working; say so and stop rather than
+    // stay "active" on a dead session.
+    watchExpiry(session.expires_at, () => {
+      relay.abortInFlight();
+      fail(`This tool session expired (${session.expires_at}). Start "modelriver tools" again for a new session ID.`);
+    });
+
     let stopping = false;
     const cleanup = async () => {
       if (stopping) process.exit(130); // second Ctrl+C: leave now
@@ -720,4 +759,4 @@ async function toolsCommand(options) {
   }
 }
 
-module.exports = { toolsCommand, handleToolCall, describeResult, formatBody, toolLabel, resolveApiKey, ToolCallRelay };
+module.exports = { watchExpiry, toolsCommand, handleToolCall, describeResult, formatBody, toolLabel, resolveApiKey, ToolCallRelay };

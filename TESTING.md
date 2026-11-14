@@ -121,6 +121,10 @@ Checks worth doing:
 - A tool that returns a non-UTF-8 body (e.g. raw image bytes) sends its status with no body.
 - In a folder with a `.modelriverrc` that sets `api_key`, `modelriver tools` refuses to start unless you pass `--api-key`, set `MODELRIVER_API_KEY`, or have a key in `~/.modelriver/config.json`.
 - Up to 5 connected sessions per API key owner per project. A sixth `modelriver tools` while 5 are connected is refused; disconnected sessions are replaced, oldest first.
+- Restart `modelriver tools` and it rejoins the saved session (ID shown as `cts_…1234`). If the saved session has less than an hour left, it opens a new one instead. When a session reaches its expiry time, the CLI says it expired and exits with code 1.
+- Start several `modelriver tools --new-session` at once (same key and target): `~/.modelriver/tool-sessions.json` stays valid JSON, `0600`, and keeps the newest session.
+- In a folder with a `.modelriverrc` that sets `api_key`, `modelriver login` does not offer that key as the default. After `modelriver login --api-url http://localhost:4000`, commands in that folder use the saved URL.
+- A tool approval prompt containing U+202E (right-to-left override) or a zero-width space shows them as `\u202e` / `\u200b`.
 - Your production tool endpoint rejects a call whose body has `request.via == "cli"` (the CLI session receives the full signed call, so production must not accept calls meant for it).
 
 ## Troubleshooting

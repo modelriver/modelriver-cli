@@ -3,7 +3,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const { WebSocketServer } = require('ws');
-const { handleToolCall, describeResult, formatBody, toolLabel, resolveApiKey, ToolCallRelay } = require('./tools');
+const { watchExpiry, handleToolCall, describeResult, formatBody, toolLabel, resolveApiKey, ToolCallRelay } = require('./tools');
 const { Config } = require('../lib/config');
 const CLIWebSocketClient = require('../lib/cli-websocket-client');
 const { PushError } = CLIWebSocketClient;
@@ -615,5 +615,48 @@ describe('tools command: resolveApiKey', () => {
 
   it('asks for a key when there is none at all', () => {
     expect(() => resolveApiKey(undefined, new Config())).toThrow(/API key is required/);
+  });
+});
+
+describe('tools command: watchExpiry', () => {
+  it('calls back once the expiry time has passed', async () => {
+    const onExpired = jest.fn();
+    const cancel = watchExpiry(new Date(Date.now() + 80).toISOString(), onExpired);
+    expect(typeof cancel).toBe('function');
+    expect(onExpired).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(onExpired).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls back at once for a time already past', () => {
+    const onExpired = jest.fn();
+    watchExpiry('2020-01-01T00:00:00Z', onExpired);
+    expect(onExpired).toHaveBeenCalledTimes(1);
+  });
+
+  it('can be cancelled, and ignores a missing or unreadable time', async () => {
+    const onExpired = jest.fn();
+    watchExpiry(new Date(Date.now() + 50).toISOString(), onExpired)();
+    expect(watchExpiry(undefined, onExpired)).toBeNull();
+    expect(watchExpiry('not a date', onExpired)).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(onExpired).not.toHaveBeenCalled();
+  });
+
+  it('waits in steps when the expiry is beyond what setTimeout allows', () => {
+    jest.useFakeTimers();
+    try {
+      let now = Date.parse('2026-01-01T00:00:00Z');
+      const onExpired = jest.fn();
+      watchExpiry(new Date(now + 40 * 24 * 3600 * 1000).toISOString(), onExpired, { now: () => now });
+      now += 2 ** 31 - 1;
+      jest.advanceTimersByTime(2 ** 31 - 1);
+      expect(onExpired).not.toHaveBeenCalled();
+      now += 40 * 24 * 3600 * 1000;
+      jest.runOnlyPendingTimers();
+      expect(onExpired).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

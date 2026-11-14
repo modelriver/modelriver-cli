@@ -18,6 +18,34 @@ describe('tool approvals: showing calls as plain text', () => {
     expect(plainText('\u009b2J')).toBe('\\u009b2J');
   });
 
+  it.each([
+    ['U+202E right-to-left override', '\u202e'],
+    ['U+202A left-to-right embedding', '\u202a'],
+    ['U+2066 left-to-right isolate', '\u2066'],
+    ['U+2069 pop directional isolate', '\u2069'],
+    ['U+200B zero-width space', '\u200b'],
+    ['U+200F right-to-left mark', '\u200f'],
+    ['U+2028 line separator', '\u2028'],
+    ['U+2029 paragraph separator', '\u2029'],
+    ['U+FEFF zero-width no-break space', '\ufeff'],
+    ['U+2060 word joiner', '\u2060'],
+    ['U+061C Arabic letter mark', '\u061c'],
+  ])('escapes the hidden or bidi character %s', (_label, ch) => {
+    const code = ch.charCodeAt(0).toString(16).padStart(4, '0');
+    expect(plainText(`pay${ch}100`)).toBe(`pay\\u${code}100`);
+  });
+
+  it('shows a reversed-text trick literally, in arguments too', () => {
+    // Would display as "amount: 100 USD" while the text says something else.
+    const tricky = 'DSU 001 :tnuoma\u202e';
+    expect(plainText(tricky)).toBe('DSU 001 :tnuoma\\u202e');
+    expect(formatArguments({ note: '\u2066hidden\u2069' })).toEqual(['  note: \\u2066hidden\\u2069']);
+  });
+
+  it('leaves ordinary non-ASCII text alone', () => {
+    expect(plainText('Zürich — 東京 — مرحبا ✓')).toBe('Zürich — 東京 — مرحبا ✓');
+  });
+
   it('shows non-text values as JSON', () => {
     expect(plainText(1041)).toBe('1041');
     expect(plainText({ a: [1, 'x'] })).toBe('{"a":[1,"x"]}');

@@ -1,7 +1,10 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawn } = require('child_process');
 const ToolSessionStore = require('./tool-session-store');
+
+const WRITER = path.join(__dirname, '..', '..', 'test', 'support', 'session-store-writer.js');
 
 describe('ToolSessionStore', () => {
   const T0 = Date.parse('2026-11-14T10:00:00Z');
@@ -60,13 +63,26 @@ describe('ToolSessionStore', () => {
     expect(store.load(keyOf({ apiUrl: 'http://localhost:4000' }))).toBeNull();
   });
 
-  it('does not return a session that has expired, or is about to', () => {
+  it('does not return a session with less than an hour left', () => {
     const key = keyOf();
-    store.save(key, session({ expires_at: new Date(T0 + 10 * 60 * 1000).toISOString() }));
+    store.save(key, session({ expires_at: new Date(T0 + 3 * 60 * 60 * 1000).toISOString() }));
     expect(store.load(key)).not.toBeNull();
 
-    now = T0 + 9 * 60 * 1000 + 30 * 1000; // 30 seconds left
+    now = T0 + 2 * 60 * 60 * 1000; // exactly an hour left: still rejoined
+    expect(store.load(key)).not.toBeNull();
+
+    now = T0 + 2 * 60 * 60 * 1000 + 1000; // 59:59 left
     expect(store.load(key)).toBeNull();
+
+    now = T0 + 4 * 60 * 60 * 1000; // expired
+    expect(store.load(key)).toBeNull();
+  });
+
+  it('keeps another key\'s session with under an hour left (another CLI may be using it), but drops expired ones', () => {
+    const other = keyOf({ origin: 'http://localhost:4000' });
+    store.save(other, session({ session_id: 'cts_short_session_token_0123456789ab', expires_at: new Date(T0 + 30 * 60 * 1000).toISOString() }));
+    store.save(keyOf(), session());
+    expect(fs.readFileSync(store.file, 'utf8')).toContain('cts_short_session_token');
   });
 
   it('drops expired sessions from the file when another one is saved', () => {
@@ -128,5 +144,86 @@ describe('ToolSessionStore', () => {
 
     store.save(key, session());
     expect(store.load(key)).not.toBeNull();
+  });
+
+  describe('several CLIs at once', () => {
+    it('keeps every record when several processes write at the same time', async () => {
+      const SHARED = 'shared';
+      // A long-lived session every writer adds forwarded calls to.
+      new ToolSessionStore({ dir }).save(SHARED, session({ session_id: 'cts_shared_session_0123456789abcd', expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString() }));
+
+      const WRITERS = 6;
+      const EACH = 15;
+      const startAt = Date.now() + 500;
+      const runs = Array.from({ length: WRITERS }, (_, n) => new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [WRITER, dir, `w${n}`, String(EACH), SHARED, String(startAt)], { stdio: ['ignore', 'ignore', 'pipe'] });
+        let stderr = '';
+        child.stderr.on('data', (d) => { stderr += d; });
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`writer ${n} failed: ${stderr}`))));
+      }));
+      await Promise.all(runs);
+
+      const reader = new ToolSessionStore({ dir });
+      const all = reader.readAll();
+      for (let n = 0; n < WRITERS; n += 1) {
+        for (let i = 0; i < EACH; i += 1) {
+          expect(all[`w${n}-${i}`]).toMatchObject({ session_id: `cts_w${n}_${i}_0123456789abcdef` });
+        }
+      }
+      expect(Object.keys(all)).toHaveLength(WRITERS * EACH + 1);
+      expect(all[SHARED].forwarded).toHaveLength(WRITERS * EACH);
+      expect(fs.existsSync(reader.lockFile)).toBe(false);
+      expect(fs.readdirSync(dir).filter((f) => f.includes('.tmp') || f.includes('.stale'))).toEqual([]);
+    }, 30000);
+
+    it('takes over a lock left by a crashed CLI (older than 10 s)', () => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(store.lockFile, '99999\n');
+      const old = (Date.now() - 20 * 1000) / 1000;
+      fs.utimesSync(store.lockFile, old, old);
+
+      store.save(keyOf(), session());
+      expect(store.load(keyOf())).not.toBeNull();
+      expect(fs.existsSync(store.lockFile)).toBe(false);
+    });
+
+    it('waits for a lock another CLI holds, then gives up with a clear error', () => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(store.lockFile, '99999\n');
+      const waiting = new ToolSessionStore({ dir, now: () => now, lockTimeoutMs: 150 });
+      const started = Date.now();
+      expect(() => waiting.save(keyOf(), session())).toThrow(/Timed out waiting for .*tool-sessions\.json\.lock/);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+      expect(fs.existsSync(store.lockFile)).toBe(true); // not ours to remove
+      expect(waiting.load(keyOf())).toBeNull();
+    });
+  });
+
+  it('tightens the folder to 0700 and the file to 0600 when it reads them', () => {
+    store.save(keyOf(), session());
+    fs.chmodSync(dir, 0o755);
+    fs.chmodSync(store.file, 0o644);
+
+    expect(store.load(keyOf())).not.toBeNull();
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(store.file).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes a record only while it is still the given session', () => {
+    const key = keyOf();
+    store.save(key, session());
+    // Another CLI (--new-session) saved a newer session under the same key.
+    store.save(key, session({ session_id: 'cts_newer_session_token_0123456789' }));
+
+    expect(store.remove(key, TOKEN)).toBe(false);
+    expect(store.load(key)).toMatchObject({ session_id: 'cts_newer_session_token_0123456789' });
+
+    store.addForwarded(key, 'call_from_the_old_cli', TOKEN);
+    expect(store.load(key).forwarded).toEqual([]);
+    store.addForwarded(key, 'call_from_the_new_cli', 'cts_newer_session_token_0123456789');
+    expect(store.load(key).forwarded).toEqual(['call_from_the_new_cli']);
+
+    expect(store.remove(key, 'cts_newer_session_token_0123456789')).toBe(true);
+    expect(store.load(key)).toBeNull();
   });
 });

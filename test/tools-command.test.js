@@ -11,6 +11,12 @@ const CLI = path.join(__dirname, '..', 'bin', 'modelriver');
 const TOKEN = 'cts_mock_session_token_0123456789';
 const CHANNEL = 'cli_tools:5d6e7f80-aaaa-bbbb-cccc-000000000001';
 
+// Session expiry a day from now (a fixed date would make the CLI's expiry
+// exit fire once that date has passed).
+function inADay() {
+  return new Date(Date.now() + 24 * 3600 * 1000).toISOString();
+}
+
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 }
@@ -54,7 +60,7 @@ describe('modelriver tools (end to end)', () => {
       }
       if (req.url === '/api/v1/cli/tool-sessions') {
         res.writeHead(201);
-        return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: '2026-11-15T00:00:00Z', project_id: 'p1' }));
+        return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: inADay(), project_id: 'p1' }));
       }
       res.writeHead(404);
       return res.end('{}');
@@ -74,7 +80,7 @@ describe('modelriver tools (end to end)', () => {
             ws.send(JSON.stringify({
               topic: msg.topic, event: 'phx_reply', ref: msg.ref,
               payload: ok
-                ? { status: 'ok', response: { session_id: '5d6e7f80', expires_at: '2026-11-15T00:00:00Z' } }
+                ? { status: 'ok', response: { session_id: '5d6e7f80', expires_at: inADay() } }
                 : { status: 'error', response: { reason: 'unauthorized' } },
             }));
             if (ok) {
@@ -141,7 +147,7 @@ describe('modelriver tools (end to end)', () => {
       }
       if (req.url === '/api/v1/cli/tool-sessions') {
         res.writeHead(201);
-        return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: '2026-11-15T00:00:00Z', project_id: 'p1' }));
+        return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: inADay(), project_id: 'p1' }));
       }
       res.writeHead(404);
       return res.end('{}');
@@ -181,7 +187,7 @@ describe('modelriver tools (end to end)', () => {
 
     // Mock API, socket and tool server. `onJoin(ws, msg, nth)` runs after
     // each accepted join; joins of `refuse` topics get "unauthorized".
-    async function startAll({ onJoin = () => {}, refuse = [], sessionsOff = false } = {}) {
+    async function startAll({ onJoin = () => {}, refuse = [], sessionsOff = false, expiresAt = inADay } = {}) {
       sessionPosts = 0;
       joins = [];
       results = [];
@@ -209,7 +215,7 @@ describe('modelriver tools (end to end)', () => {
             return res.end(JSON.stringify({ message: 'Hosted tools are not available for this organization' }));
           }
           res.writeHead(201);
-          return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(), project_id: 'p1' }));
+          return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: expiresAt(), project_id: 'p1' }));
         }
         res.writeHead(404);
         return res.end('{}');
@@ -318,7 +324,7 @@ describe('modelriver tools (end to end)', () => {
     it('opens a new session, and says so, when the saved one can no longer be joined', async () => {
       await startAll({ refuse: [OLD_CHANNEL] });
       const store = new ToolSessionStore();
-      store.save(storeKey(), { session_id: OLD_TOKEN, channel: OLD_CHANNEL, expires_at: new Date(Date.now() + 3600 * 1000).toISOString(), project_id: 'p1' });
+      store.save(storeKey(), { session_id: OLD_TOKEN, channel: OLD_CHANNEL, expires_at: new Date(Date.now() + 2 * 3600 * 1000).toISOString(), project_id: 'p1' });
 
       const run = start(cliArgs());
       await until(() => run.output.includes('Press Ctrl+C'), 'the CLI to start', run);
@@ -337,7 +343,7 @@ describe('modelriver tools (end to end)', () => {
       // and so is a new session. The saved one must survive for later.
       await startAll({ refuse: [OLD_CHANNEL], sessionsOff: true });
       const store = new ToolSessionStore();
-      store.save(storeKey(), { session_id: OLD_TOKEN, channel: OLD_CHANNEL, expires_at: new Date(Date.now() + 3600 * 1000).toISOString(), project_id: 'p1' });
+      store.save(storeKey(), { session_id: OLD_TOKEN, channel: OLD_CHANNEL, expires_at: new Date(Date.now() + 2 * 3600 * 1000).toISOString(), project_id: 'p1' });
 
       const run = start(cliArgs());
       const code = await new Promise((resolve) => child.on('exit', resolve));
@@ -349,10 +355,35 @@ describe('modelriver tools (end to end)', () => {
       expect(store.load(storeKey())).toMatchObject({ session_id: OLD_TOKEN, channel: OLD_CHANNEL });
     }, 30000);
 
+    it('opens a new session instead of rejoining a saved one with less than an hour left', async () => {
+      await startAll();
+      const store = new ToolSessionStore();
+      store.save(storeKey(), { session_id: OLD_TOKEN, channel: OLD_CHANNEL, expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), project_id: 'p1' });
+
+      const run = start(cliArgs());
+      await until(() => run.output.includes('Press Ctrl+C'), 'the CLI to start', run);
+
+      expect(joins.map((join) => join.topic)).toEqual([CHANNEL]);
+      expect(sessionPosts).toBe(1);
+      expect(run.output).toContain(`"tool_route": {"cli_session": "${TOKEN}"}`);
+      expect(store.load(storeKey())).toMatchObject({ session_id: TOKEN });
+    }, 30000);
+
+    it('says the session expired and exits non-zero when it reaches expires_at', async () => {
+      await startAll({ expiresAt: () => new Date(Date.now() + 1500).toISOString() });
+      const run = start(cliArgs(['--new-session']));
+      const exited = new Promise((resolve) => child.on('exit', resolve));
+      await until(() => run.output.includes('Tool forwarding active'), 'the CLI to start', run);
+
+      const code = await exited;
+      expect(code).toBe(1);
+      expect(run.output).toMatch(/This tool session expired \(.+\)\. Start "modelriver tools" again for a new session ID\./);
+    }, 30000);
+
     it('--new-session opens a new session even when one is saved', async () => {
       await startAll();
       const store = new ToolSessionStore();
-      store.save(storeKey(), { session_id: OLD_TOKEN, channel: OLD_CHANNEL, expires_at: new Date(Date.now() + 3600 * 1000).toISOString(), project_id: 'p1' });
+      store.save(storeKey(), { session_id: OLD_TOKEN, channel: OLD_CHANNEL, expires_at: new Date(Date.now() + 2 * 3600 * 1000).toISOString(), project_id: 'p1' });
 
       const run = start(cliArgs(['--new-session']));
       await until(() => run.output.includes('Press Ctrl+C'), 'the CLI to start', run);
@@ -383,7 +414,7 @@ describe('modelriver tools (end to end)', () => {
         return res.end(JSON.stringify({ ws_token: 'ws-tok', websocket_url: `ws://127.0.0.1:${api.address().port}/cli` }));
       }
       res.writeHead(201);
-      return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: '2026-11-15T00:00:00Z', project_id: 'p1' }));
+      return res.end(JSON.stringify({ session_id: TOKEN, channel: CHANNEL, expires_at: inADay(), project_id: 'p1' }));
     });
     wss = new WebSocketServer({ server: api });
     wss.on('connection', (ws) => {

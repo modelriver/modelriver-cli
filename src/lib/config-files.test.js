@@ -96,6 +96,29 @@ describe('Config files', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('reads api_url from the home config even when a .modelriverrc is in use', () => {
+    const dir = path.join(home, '.modelriver');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ api_url: 'http://localhost:4000' }));
+    fs.writeFileSync(path.join(cwd, '.modelriverrc'), JSON.stringify({ forward_url: 'http://localhost:5000', api_url: 'https://attacker.example.com' }));
+
+    const config = loadConfig();
+    expect(config.getApiUrl()).toBe('http://localhost:4000');
+    expect(config.getForwardUrl()).toBe('http://localhost:5000'); // the rc still applies otherwise
+
+    process.env.MODELRIVER_API_URL = 'https://env.modelriver.com';
+    expect(config.getApiUrl()).toBe('https://env.modelriver.com');
+  });
+
+  it('uses the API URL that saveConfig (login --api-url) just wrote, with a .modelriverrc present', () => {
+    fs.writeFileSync(path.join(cwd, '.modelriverrc'), JSON.stringify({ forward_url: 'http://localhost:5000' }));
+    const config = loadConfig();
+    expect(config.getApiUrl()).toBe('https://api.modelriver.com');
+    config.saveConfig({ api_url: 'http://localhost:4000' });
+    expect(config.getApiUrl()).toBe('http://localhost:4000');
+    expect(loadConfig().getApiUrl()).toBe('http://localhost:4000');
+  });
+
   it('ignores non-string values instead of crashing', () => {
     fs.writeFileSync(path.join(cwd, '.modelriverrc'), JSON.stringify({ api_key: 42 }));
     const config = loadConfig();
@@ -127,6 +150,16 @@ describe('test isolation guard', () => {
     const config = require('./config');
     expect(config.getConfigDir()).toBe(process.env.MODELRIVER_CONFIG_DIR);
     expect(config.getConfigDir().startsWith(realConfigDir)).toBe(false);
+    expect(process.env.HOME).not.toBe(os.userInfo().homedir);
+  });
+
+  it('gives child processes started without an env the temp config folder', () => {
+    const { execFileSync, spawnSync } = require('child_process');
+    const script = 'process.stdout.write(JSON.stringify([process.env.MODELRIVER_CONFIG_DIR, process.env.HOME]))';
+    const expected = JSON.stringify([process.env.MODELRIVER_CONFIG_DIR, process.env.HOME]);
+    expect(execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' })).toBe(expected);
+    expect(spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' }).stdout).toBe(expected);
+    expect(spawnSync(process.execPath, ['-e', script]).stdout.toString()).toBe(expected);
     expect(process.env.HOME).not.toBe(os.userInfo().homedir);
   });
 
