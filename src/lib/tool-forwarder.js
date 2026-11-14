@@ -186,9 +186,11 @@ function copyHeaders(headers) {
  * @param {object} options
  * @param {string} options.origin - forward origin, e.g. http://localhost:3000
  * @param {Function} [options.lookup] - dns.promises.lookup-compatible (tests)
- * @returns {Promise<{status: number, body: (string|null), error?: string, ms: number, url?: string, message?: string}>}
+ * @param {AbortSignal} [options.signal] - aborts the local request (Ctrl+C);
+ *   the result is then connection_failed
+ * @returns {Promise<{status: number, body: (string|null), error?: string, ms: number, url?: string, message?: string, aborted?: boolean}>}
  */
-async function forwardToolCall(call, { origin, lookup } = {}) {
+async function forwardToolCall(call, { origin, lookup, signal } = {}) {
   const started = Date.now();
   const done = (result) => ({ ...result, ms: Date.now() - started });
 
@@ -211,14 +213,21 @@ async function forwardToolCall(call, { origin, lookup } = {}) {
   headers.host = target.host;
 
   const transport = target.protocol === 'https:' ? https : http;
+  const abortedResult = {
+    status: 0, body: null, error: 'connection_failed', message: 'Stopped before the local server answered', aborted: true,
+  };
+
+  if (signal && signal.aborted) return done({ ...abortedResult, url: target.href });
 
   return new Promise((resolve) => {
     let settled = false;
     let timer = null;
+    let onAbort = null;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
       resolve(done({ ...result, url: target.href }));
     };
 
@@ -286,6 +295,14 @@ async function forwardToolCall(call, { origin, lookup } = {}) {
       finish({ status: 0, body: null, error: 'timeout', message: `No complete response within ${timeoutMs}ms` });
       req.destroy();
     }, timeoutMs);
+
+    if (signal) {
+      onAbort = () => {
+        finish(abortedResult);
+        req.destroy();
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     req.on('error', (error) => {
       finish({ status: 0, body: null, error: 'connection_failed', message: error.code || error.message });

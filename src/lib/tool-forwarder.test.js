@@ -299,4 +299,34 @@ describe('forwardToolCall', () => {
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(received.headers.host).toBe(`tools.test:${port}`);
   });
+
+  it('aborts the local request when the signal fires, and reports connection_failed', async () => {
+    let closed = false;
+    handler = (req, res) => { res.on('close', () => { closed = true; }); }; // never answers
+    const controller = new AbortController();
+    const pending = forwardToolCall({ ...baseCall(), timeout_ms: 5000 }, { origin, signal: controller.signal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+    const result = await pending;
+    expect(result).toMatchObject({ status: 0, body: null, error: 'connection_failed', aborted: true });
+    expect(result.ms).toBeLessThan(1000);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(closed).toBe(true);
+  });
+
+  it('sends nothing when the signal has already fired', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await forwardToolCall(baseCall(), { origin, signal: controller.signal });
+    expect(result).toMatchObject({ error: 'connection_failed', aborted: true });
+    expect(received).toBeNull();
+  });
+
+  it('is not affected by a signal that fires after the answer', async () => {
+    const controller = new AbortController();
+    const result = await forwardToolCall(baseCall(), { origin, signal: controller.signal });
+    controller.abort();
+    expect(result).toMatchObject({ status: 200, body: '{"temp":21}' });
+    expect(result.aborted).toBeUndefined();
+  });
 });

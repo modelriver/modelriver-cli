@@ -88,7 +88,7 @@ export MODELRIVER_API_KEY=mr_live_YOUR_API_KEY
 export MODELRIVER_API_URL=https://api.modelriver.com  # Optional, defaults to production
 ```
 
-The API URL must use `https`. Plain `http` is accepted only for `localhost`, `127.0.0.1` and `::1` (a local ModelRiver server).
+The API URL must use `https`. Plain `http` is accepted only for `localhost`, `127.0.0.0/8` and `::1` (a local ModelRiver server).
 
 ### Config File
 
@@ -253,9 +253,18 @@ modelriver websocket --workflow my-workflow --payload '{"messages": [{"role": "u
 # Connect to existing channel
 modelriver websocket --channel-id abc-123 --project-id xyz-789
 
+# Hosted tools: say who the request is for, and send its tool calls to `modelriver tools`
+modelriver websocket --workflow my-workflow --message "Cancel order 1041" \
+  --end-user user_812 --cli-session cts_...
+
 # Verbose output
 modelriver websocket --workflow my-workflow --message "Test" --verbose
 ```
+
+- `--end-user <id>` adds `"end_user": {"id": "<id>"}` to the request, unless `--payload` already has an `end_user`. Workflows with hosted tools need one.
+- `--cli-session <cts_id>` adds `"tool_route": {"cli_session": "<cts_id>"}`, unless `--payload` already has a `tool_route`.
+
+The command waits 5 minutes for the response. When a call to a tool that changes something waits for approval, it prints the call and the commands that decide it, and keeps waiting until the last waiting call expires, plus 5 minutes for the request to carry on (never more than 65 minutes per round of approvals; a later round that waits again extends it the same way). It also shows each decision. It exits with code 1 when the wait ends or the connection closes before a response, and when ModelRiver refuses the request (it then prints the error code, message and details, and for a `429` how long to wait). The WebSocket URL from the server must use `wss://` (a `ws://` URL on port 443 or a `modelriver.com` host is treated as `wss://`); only `localhost`, `127.0.0.0/8` and `::1` may use `ws://`.
 
 **Example Output:**
 ```
@@ -345,6 +354,8 @@ modelriver tools --forward-to http://localhost:3000
 
 Add this to a POST /v1/ai/async request to send its tool calls here:
   "tool_route": {"cli_session": "cts_..."}
+Or send one and follow it (approvals included) from another terminal:
+  modelriver websocket -w <workflow> -m "..." --end-user <id> --cli-session cts_...
 ```
 
 Then send a request that names the session:
@@ -363,7 +374,8 @@ The CLI prints one line per call (tool, status, time). Add `--print` to also see
 
 **Options:**
 - `--forward-to <url>` (required) - your local tool server. Only the origin is used.
-- `--print` - print arguments and results
+- `--print` - print arguments and results. Calls to a tool that changes something are marked `[write]` when the server says so.
+- `--new-session` - open a new session instead of rejoining the one saved on this machine (see "Restarting" below).
 - `-k, --api-key <key>` - API key. Without it the key comes from `MODELRIVER_API_KEY` or `~/.modelriver/config.json`, never from a `.modelriverrc` in the current directory.
 - `--api-url <url>` - API base URL
 - `-v, --verbose` - verbose output
@@ -373,14 +385,80 @@ The CLI prints one line per call (tool, status, time). Add `--print` to also see
 - `http` and `https` are both allowed. Redirects are not followed.
 - The CLI waits no longer than the tool's timeout, and stops reading a response once it is larger than the tool's result size limit (`too_large`).
 - A request only goes to the CLI when it names the session in `tool_route`. If the CLI is not connected, the request is refused; ModelRiver never falls back to the tool's real URL.
-- If the CLI disconnects or stops during a run, new tool calls fail at once as tool unavailable. Only calls already sent to the CLI wait, and time out if no result comes back. On Ctrl+C the CLI answers its in-flight calls with `connection_failed` before it exits.
-- The session lasts 24 hours. Treat the session ID like a password while it is valid. If the WebSocket drops, the CLI reconnects with a new token and rejoins the same session. A result that was ready while the CLI was disconnected is sent after the rejoin, as long as the call's timeout hasn't passed.
+- If the CLI disconnects or stops during a run, new tool calls fail at once as tool unavailable. Only calls already sent to the CLI wait, and time out if no result comes back. On Ctrl+C the CLI answers its in-flight calls with `connection_failed` before it exits; a call that arrives after Ctrl+C is not forwarded and is answered `target_refused`, so ModelRiver records it as not sent.
+- The session lasts 24 hours. Treat the session ID like a password while it is valid. If the WebSocket drops, the CLI reconnects with a new token and rejoins the same session. A result that was ready while the CLI was disconnected is sent after the rejoin, as long as the call's timeout hasn't passed, and ModelRiver takes it if the call is still waiting. ModelRiver uses the first result it gets for a call; a later copy (the CLI may have sent one just before the connection dropped) is answered `already_answered` and changes nothing. If the call stopped waiting first, the CLI notes that ModelRiver is no longer waiting for it, and the call is recorded as timed out (as unknown, for a tool that changes something). The CLI never forwards a call to your server twice.
+- **Restarting.** The session is saved in `~/.modelriver/tool-sessions.json` (readable only by you: `0600`, in a `0700` folder). Start `modelriver tools` again with the same API key, API URL and `--forward-to` origin, also after it was killed, and it rejoins that session instead of opening a new one. Requests that already name the session keep working, and a call that was waiting for approval reaches the restarted CLI once it is approved. The session ID is printed in full only when the session is opened; after a restart it is shown as `cts_…1234`. If the saved session can no longer be joined (it expired or was removed), the CLI says so and opens a new one, with a new ID. If hosted tools is off for the organization, it stops with that message and keeps the saved session for later. `--new-session` always opens a new one.
+- **Never twice, across restarts too.** The file also lists the calls the CLI has handed to your server (the latest 1000 per session), written before each call goes out. A restarted CLI answers any of them `connection_failed` without forwarding it. ModelRiver itself never sends a call again: a call that was in flight when the CLI was killed is not re-sent after the restart. It times out, and for a tool that changes something its outcome is recorded as unknown.
+- One connection per session. Starting a second `modelriver tools` with the same API key and `--forward-to` rejoins the same session, so it takes over from the first. If another connection joins the same session, it takes over: ModelRiver sends the tool calls there, and this CLI stops and says so instead of reconnecting.
+- The WebSocket URL the server gives must use `wss://`. Only `localhost`, `127.0.0.0/8` and `::1` may use `ws://`.
 - Each API key owner can have up to 5 connected tool sessions per project. Opening another one replaces your oldest disconnected session; if all 5 are connected, it is refused until you stop one.
 - Response bodies must be UTF-8. For any other body the CLI sends the status code without the body.
 
 **Protect your production endpoints:** the CLI session receives each tool call exactly as signed, so a valid signature alone doesn't prove a call came from a live run. Calls meant for the CLI have `request.via == "cli"` in their body. Production tool endpoints should reject those.
 
 Errors the CLI can send back for a call: `timeout`, `connection_failed`, `too_large`, `target_refused`.
+
+#### Tools that change something
+
+A tool marked as changing something (refund an order, send an email) never runs on the model's say-so alone. ModelRiver pauses the request and asks the request's end user first. Only an approved call is sent to `modelriver tools`, and it is sent once.
+
+1. Start `modelriver tools` and leave it running.
+2. In another terminal, send a request that names the session and an end user, and follow it:
+
+   ```bash
+   modelriver websocket -w my-workflow -m "Cancel order 1041" --end-user user_812 --cli-session cts_...
+   ```
+
+3. When the model calls the tool, the request waits. `modelriver websocket` shows what the end user would see, and the commands that decide it:
+
+   ```
+   ⚠ Waiting for approval: cancel_order (call tc_3f2a9c1d5b7e4a6f8c0d1e2b)
+     Prompt: Cancel this order? This can't be undone.
+     Arguments shown to the end user:
+       order_id: 1041
+     Expires: 2026-11-14T10:20:00Z
+     Decide it with:
+       modelriver tools approve tc_3f2a9c1d5b7e4a6f8c0d1e2b --end-user user_812
+       modelriver tools reject tc_3f2a9c1d5b7e4a6f8c0d1e2b --end-user user_812
+   ```
+
+4. Approve or decline it, as your backend would for its user:
+
+   ```bash
+   modelriver tools approve tc_3f2a9c1d5b7e4a6f8c0d1e2b --end-user user_812
+   modelriver tools reject  tc_3f2a9c1d5b7e4a6f8c0d1e2b --end-user user_812   # or: decline
+   modelriver tools show    tc_3f2a9c1d5b7e4a6f8c0d1e2b                        # prompt and shown arguments
+   ```
+
+   These call `POST /v1/ai/tool-calls/:call_id/approve` (or `/reject`) with `{"end_user": {"id": "..."}}`, and `GET /v1/ai/tool-calls/:call_id`, with your API key. `--end-user` must be the `end_user.id` the request was sent with. Prompts and arguments are printed as plain text: control characters show as `\uXXXX`, so text from the model can't drive your terminal.
+
+What to expect:
+- **Keep `modelriver tools` running while a call waits.** The wait lasts as long as the workflow's approval timeout (10 minutes by default, at most an hour). If the CLI isn't connected when the call is approved, the call is not sent, and ModelRiver records it as not run (`tool_unavailable`). It never falls back to the tool's real URL.
+- **Once, never retried.** An approved call reaches your server at most once. ModelRiver never retries a tool that changes something, and the CLI remembers every call of the session: a repeated `tool_call` (same `reply_ref` or same call id) is never forwarded again; a repeat under a new `reply_ref` is answered `connection_failed`.
+- **Unknown outcomes.** If the call may have reached your server but no answer says what happened (a timeout, a dropped connection, a `5xx`, a response larger than the result size limit, or Ctrl+C), ModelRiver records the outcome as unknown and tells the model not to claim it succeeded. A `4xx` stays an error: your tool refused the call. A `2xx` whose body isn't a JSON object or array counts as done: the call is recorded as `ok`, and the model is told the action ran but its result could not be read.
+- **Ctrl+C mid-call.** The CLI aborts its request to your server and answers `connection_failed`. Your server may already have done the work, so the CLI warns that the call may have run, and ModelRiver records it as unknown.
+- **Timeouts and takeovers.** When your server doesn't answer within the tool's timeout, or another connection takes over the session mid-call, the CLI stops waiting and warns that the call may already have run.
+- **Declined or expired calls** are not run. The model is told, and the request carries on.
+- **Errors from approve/reject:** `end_user_required` / `end_user_invalid` (pass `--end-user`), `tool_call_not_found` (wrong id, another project's call, a Playground call, or a call that needed no approval), `end_user_mismatch` (another end user's call), `tool_call_already_decided` (with the decision it already has), `tool_approval_expired`, and `429` with the number of seconds to wait. Repeating the same decision is fine.
+
+#### Check the tool signature
+
+Your tool server should check `x-modelriver-signature` on every call. The CLI includes a checker you can use from Node:
+
+```js
+const ToolSignature = require('@modelriver/cli/tool-signature');
+
+app.post('/tools/cancel-order', express.raw({ type: 'application/json' }), (req, res) => {
+  // req.body is the raw body (a Buffer): check it before parsing
+  if (!ToolSignature.verifyRequest(req.headers, req.body, process.env.MODELRIVER_TOOL_SECRET)) {
+    return res.status(401).json({ error: { message: 'Bad signature' } });
+  }
+  const call = JSON.parse(req.body);
+  // ...
+});
+```
+
+It checks `v2=hex(HMAC-SHA256(secret, "v2.<timestamp>.<call id>.<raw body>"))` against every value in the header (there are two, comma-separated, while a secret is being rotated), and rejects a timestamp more than 300 seconds from now. Pass an array of secrets to accept an old and a new one. Use the raw body: parsing the JSON and encoding it again changes the bytes. `ToolSignature.check(...)` reports the signature and the timestamp separately. This is not the webhook signature; `modelriver webhook verify` checks webhooks only.
 
 ### `modelriver test-webhook` - Test Webhook Delivery End-to-End
 
@@ -515,6 +593,7 @@ The CLI connects to ModelRiver WebSockets using the Phoenix protocol:
 1. Connect to `wss://api.modelriver.com/socket?token={ws_token}`
 2. Join channel: `ai_response:{project_id}:{channel_id}`
 3. Listen for `response` event containing the AI response
+4. For hosted tools, also `tool_state` (sent on join), `tool_approval_required` and `tool_approval_resolved`
 
 ## Troubleshooting
 
@@ -536,9 +615,13 @@ Set the API key via:
 
 `modelriver tools` only forwards to this machine. Use `http://localhost:<port>`, `http://127.0.0.1:<port>` or `http://[::1]:<port>`. If your tool server runs in a container or VM, publish its port on localhost.
 
+### "Refusing WebSocket URL ...: it must use wss"
+
+The server gave a WebSocket URL with plain `ws://` for a host other than this machine. The CLI refuses it so its token and your tool calls are never sent unencrypted. Check `--api-url`; a local ModelRiver server on `localhost` may use `ws://`.
+
 ### "API URL must use https"
 
-Use an `https://` API URL. Only `localhost`, `127.0.0.1` and `::1` may use `http://`.
+Use an `https://` API URL. Only `localhost`, `127.0.0.0/8` and `::1` may use `http://`.
 
 ### "Webhook signature verification failed"
 
@@ -560,6 +643,8 @@ The CLI uses these ModelRiver API endpoints:
 - `DELETE /v1/webhooks/:id` - Delete a webhook
 - `POST /v1/cli/connect` - Connect CLI and get WebSocket token
 - `POST /v1/cli/tool-sessions` - Open a CLI tool session (`modelriver tools`)
+- `GET /v1/ai/tool-calls/:call_id` - Show a call waiting for approval (`modelriver tools show`)
+- `POST /v1/ai/tool-calls/:call_id/approve` and `/reject` - Decide it (`modelriver tools approve|reject`)
 - `POST /v1/callback/:channel_id` - Complete event-driven callback
 
 **Development** (localhost or custom API URL):
@@ -581,7 +666,9 @@ Tests cover critical components including:
 - API client validation
 - Output formatting
 - Event-driven webhook payload helpers
-- Tool forwarding: loopback-only targets (including names that resolve to public IPs), exact body and headers, timeouts and size limits
+- Tool forwarding: loopback-only targets (including names that resolve to public IPs), exact body and headers, timeouts and size limits, Ctrl+C aborting the local request
+- Tool approvals: approve/reject/show requests and error messages, following a paused request, plain-text output
+- The v2 tool signature, against the documented test value
 - WebSocket client: push/reply refs, several topics, reconnect with a fresh token
 - Config file permissions and the `.modelriverrc` `api_url` rule
 

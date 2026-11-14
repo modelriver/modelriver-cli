@@ -150,11 +150,12 @@ describe('checkApiUrl', () => {
     expect(checkApiUrl('https://api.modelriver.com/')).toBe('https://api.modelriver.com');
   });
 
-  it('accepts http only for localhost, 127.0.0.1 and ::1', () => {
+  it('accepts http only for localhost, 127.0.0.0/8 and ::1 (the hosts ws:// is allowed for)', () => {
     expect(checkApiUrl('http://localhost:4000')).toBe('http://localhost:4000');
     expect(checkApiUrl('http://127.0.0.1:4000')).toBe('http://127.0.0.1:4000');
     expect(checkApiUrl('http://[::1]:4000')).toBe('http://[::1]:4000');
-    expect(() => checkApiUrl('http://127.0.0.2:4000')).toThrow(/must use https/);
+    expect(() => checkApiUrl('http://10.0.0.1:4000')).toThrow(/must use https/);
+    expect(() => checkApiUrl('http://0.0.0.0:4000')).toThrow(/must use https/);
     expect(() => checkApiUrl('http://localhost.attacker.example')).toThrow(/must use https/);
     expect(() => checkApiUrl('http://api.modelriver.com')).toThrow(/must use https/);
   });
@@ -168,5 +169,59 @@ describe('checkApiUrl', () => {
     expect(isLocalApiHost('LOCALHOST')).toBe(true);
     expect(isLocalApiHost('[::1]')).toBe(true);
     expect(isLocalApiHost('0.0.0.0')).toBe(false);
+    // the same hosts as for ws://
+    expect(isLocalApiHost('127.0.0.2')).toBe(true);
+    expect(isLocalApiHost('127.0.0.1.nip.io')).toBe(false);
+    expect(checkApiUrl('http://127.0.0.2:4000')).toBe('http://127.0.0.2:4000');
+  });
+});
+
+describe('checkWebSocketUrl', () => {
+  const { checkWebSocketUrl, isLoopbackHost } = require('./url-helpers');
+
+  it('accepts wss for any host', () => {
+    expect(checkWebSocketUrl('wss://api.modelriver.com/socket')).toBe('wss://api.modelriver.com/socket');
+  });
+
+  it('accepts ws only for localhost, 127.0.0.0/8 and ::1', () => {
+    expect(checkWebSocketUrl('ws://localhost:4000/socket')).toBe('ws://localhost:4000/socket');
+    expect(checkWebSocketUrl('ws://127.0.0.1:4000/socket')).toBe('ws://127.0.0.1:4000/socket');
+    expect(checkWebSocketUrl('ws://127.4.5.6/socket')).toBe('ws://127.4.5.6/socket');
+    expect(checkWebSocketUrl('ws://[::1]:4000/socket')).toBe('ws://[::1]:4000/socket');
+  });
+
+  it('refuses ws for any other host, other schemes, and invalid URLs', () => {
+    expect(() => checkWebSocketUrl('ws://api.modelriver.com/socket')).toThrow(/must use wss/);
+    expect(() => checkWebSocketUrl('ws://localhost.evil.com/socket')).toThrow(/must use wss/);
+    expect(() => checkWebSocketUrl('ws://10.0.0.5/socket')).toThrow(/must use wss/);
+    expect(() => checkWebSocketUrl('http://localhost/socket')).toThrow(/must use wss/);
+    expect(() => checkWebSocketUrl('not a url')).toThrow(/invalid WebSocket URL/);
+  });
+
+  it('knows loopback hosts', () => {
+    expect(isLoopbackHost('LOCALHOST')).toBe(true);
+    expect(isLoopbackHost('127.0.0.1')).toBe(true);
+    expect(isLoopbackHost('[::1]')).toBe(true);
+    expect(isLoopbackHost('0.0.0.0')).toBe(false);
+    expect(isLoopbackHost('127.0.0.1.nip.io')).toBe(false);
+  });
+});
+
+describe('normalizeWebSocketUrl', () => {
+  const { normalizeWebSocketUrl, checkWebSocketUrl } = require('./url-helpers');
+
+  it('upgrades ws:// on port 443 or a modelriver.com host to wss://, which then passes the check', () => {
+    expect(normalizeWebSocketUrl('ws://api.modelriver.com:443/socket')).toBe('wss://api.modelriver.com/socket');
+    expect(normalizeWebSocketUrl('ws://api.modelriver.com/socket')).toBe('wss://api.modelriver.com/socket');
+    expect(normalizeWebSocketUrl('ws://example.com:443/socket')).toBe('wss://example.com/socket');
+    expect(checkWebSocketUrl(normalizeWebSocketUrl('ws://api.modelriver.com/socket'))).toBe('wss://api.modelriver.com/socket');
+  });
+
+  it('leaves other URLs as they are (the check then decides)', () => {
+    expect(normalizeWebSocketUrl('ws://localhost:4000/socket')).toBe('ws://localhost:4000/socket');
+    expect(normalizeWebSocketUrl('ws://evilmodelriver.com/socket')).toBe('ws://evilmodelriver.com/socket');
+    expect(normalizeWebSocketUrl('wss://api.modelriver.com/socket/')).toBe('wss://api.modelriver.com/socket/');
+    expect(normalizeWebSocketUrl('nope')).toBe('nope');
+    expect(normalizeWebSocketUrl(undefined)).toBeUndefined();
   });
 });

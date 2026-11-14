@@ -12,6 +12,9 @@ function defaultActions() {
     testWebhook: (...args) => require('./commands/test-webhook').testWebhookCommand(...args),
     trigger: (...args) => require('./commands/trigger').triggerCommand(...args),
     tools: (...args) => require('./commands/tools').toolsCommand(...args),
+    toolsShow: (...args) => require('./commands/tool-calls').showToolCallCommand(...args),
+    toolsApprove: (options) => require('./commands/tool-calls').decideToolCallCommand('approve', options),
+    toolsReject: (options) => require('./commands/tool-calls').decideToolCallCommand('reject', options),
     listWebhooks: (...args) => require('./commands/webhook').listWebhooks(...args),
     verifyWebhook: (...args) => require('./commands/webhook').verifyWebhook(...args),
   };
@@ -93,6 +96,8 @@ function createProgram(actions = defaultActions()) {
     .option('-m, --message <text>', 'Test message')
     .option('-P, --payload <json>', 'Custom JSON payload')
     .option('-c, --channel-id <id>', 'Existing channel ID (requires --project-id)')
+    .option('--end-user <id>', 'Send end_user {"id": <id>} with the request (hosted tools), and use it in the approve/reject commands shown')
+    .option('--cli-session <cts_id>', 'Send the request\'s tool calls to a "modelriver tools" session (tool_route)')
     .option('-v, --verbose', 'Verbose output')
     .action((options) => actions.websocket({
       ...options,
@@ -140,11 +145,14 @@ function createProgram(actions = defaultActions()) {
     .action((options) => actions.trigger({ ...options, ...api(options) }));
 
   // Tools command - send hosted tool calls to a server on this machine
-  withApiOptions(program
+  const toolsCmd = withApiOptions(program
     .command('tools')
     .description('Forward hosted tool calls to a tool server on this machine (localhost only)'))
-    .requiredOption('--forward-to <url>', 'Local tool server origin, e.g. http://localhost:3000 (localhost, 127.0.0.0/8 or ::1)')
+    // Checked in the action rather than with requiredOption, which commander
+    // would also demand from `tools show|approve|reject`.
+    .option('--forward-to <url>', 'Local tool server origin, e.g. http://localhost:3000 (localhost, 127.0.0.0/8 or ::1)')
     .option('--print', 'Print each call\'s arguments and result')
+    .option('--new-session', 'Open a new session instead of rejoining the one saved on this machine')
     .option('-v, --verbose', 'Verbose output')
     .addHelpText('after', `
 Opens a CLI tool session and prints its ID. Send a request with
@@ -153,9 +161,48 @@ and ModelRiver sends that request's tool calls here. Each call is POSTed to
 <forward-to origin><path of the tool's endpoint URL> with the same body and
 signature headers a live call has, so your signature check runs unchanged.
 
+Stopped or restarted? Start it again with the same API key and --forward-to:
+it rejoins the same session (saved, readable only by you, in the config
+folder), so requests that name it keep working. --new-session opens a new one.
+
+A call to a tool that changes something arrives only after its end user
+approves it. Keep this running while it waits; decide it with
+  modelriver tools approve <call_id> --end-user <id>
+  modelriver tools reject <call_id> --end-user <id>
+
 The API key comes from --api-key, MODELRIVER_API_KEY or ~/.modelriver/config.json,
 never from a .modelriverrc in the current directory.`)
-    .action((options) => actions.tools({ ...options, ...api(options) }));
+    .action((options, command) => {
+      if (!options.forwardTo) {
+        command.error("error: required option '--forward-to <url>' not specified");
+      }
+      return actions.tools({ ...options, ...api(options) });
+    });
+
+  // Options given before the subcommand name (`tools -k KEY approve ...`)
+  // belong to `tools`; use them when the subcommand has none.
+  const toolsApi = (options) => api({
+    apiKey: options.apiKey || toolsCmd.opts().apiKey,
+    apiUrl: options.apiUrl || toolsCmd.opts().apiUrl,
+  });
+
+  withApiOptions(toolsCmd
+    .command('show <call_id>')
+    .description('Show a call waiting for approval: its prompt and the arguments the end user sees'))
+    .action((callId, options) => actions.toolsShow({ ...options, ...toolsApi(options), callId }));
+
+  withApiOptions(toolsCmd
+    .command('approve <call_id>')
+    .description('Approve a call waiting for approval, as the end user (sent the way your backend would)'))
+    .requiredOption('--end-user <id>', 'The end_user.id the request was sent with')
+    .action((callId, options) => actions.toolsApprove({ ...options, ...toolsApi(options), callId }));
+
+  withApiOptions(toolsCmd
+    .command('reject <call_id>')
+    .alias('decline')
+    .description('Decline a call waiting for approval, as the end user; it will not run'))
+    .requiredOption('--end-user <id>', 'The end_user.id the request was sent with')
+    .action((callId, options) => actions.toolsReject({ ...options, ...toolsApi(options), callId }));
 
   // Webhook commands
   const webhookCmd = program

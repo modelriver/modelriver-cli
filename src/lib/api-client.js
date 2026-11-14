@@ -2,6 +2,20 @@ const axios = require('axios');
 const config = require('./config');
 const { checkApiUrl } = require('../utils/url-helpers');
 
+// A hosted-tools call id, as ModelRiver makes them (Signing.call_id/4).
+const TOOL_CALL_ID = /^tc_[0-9a-f]{24}$/;
+
+/**
+ * Throw unless this is a tool call id, so nothing else ends up in the URL.
+ * @param {string} callId
+ */
+function checkToolCallId(callId) {
+  if (typeof callId !== 'string' || !TOOL_CALL_ID.test(callId)) {
+    const shown = typeof callId === 'string' ? JSON.stringify(callId.slice(0, 80)) : String(callId);
+    throw new Error(`${shown} is not a tool call id (expected "tc_" followed by 24 hex characters)`);
+  }
+}
+
 function createAuthHeaders(apiKey) {
   return {
     Authorization: `Bearer ${apiKey}`,
@@ -205,6 +219,40 @@ class ApiClient {
   }
 
   /**
+   * Read a hosted-tools call waiting for approval: its prompt and the
+   * arguments the developer chose to show.
+   * GET /v1/ai/tool-calls/:call_id
+   * @param {string} callId - tc_…
+   * @returns {Promise<object>} - Axios response {status, data, headers}; 4xx don't throw
+   */
+  async getToolCall(callId) {
+    checkToolCallId(callId);
+    return this.client.get(`${this.apiPath}/ai/tool-calls/${encodeURIComponent(callId)}`, {
+      maxRedirects: 0,
+    });
+  }
+
+  /**
+   * Approve or decline a hosted-tools call for its end user.
+   * POST /v1/ai/tool-calls/:call_id/approve | reject
+   * @param {string} callId - tc_…
+   * @param {"approve"|"reject"} decision
+   * @param {string} endUserId - must be the request's end_user.id
+   * @returns {Promise<object>} - Axios response {status, data, headers}; 4xx don't throw
+   */
+  async decideToolCall(callId, decision, endUserId) {
+    if (decision !== 'approve' && decision !== 'reject') {
+      throw new Error(`Unknown decision "${decision}"`);
+    }
+    checkToolCallId(callId);
+    return this.client.post(
+      `${this.apiPath}/ai/tool-calls/${encodeURIComponent(callId)}/${decision}`,
+      { end_user: { id: endUserId } },
+      { maxRedirects: 0 }
+    );
+  }
+
+  /**
    * Is this URL on the configured API host (same scheme, host and port)?
    * @param {string} url
    * @returns {boolean}
@@ -246,5 +294,7 @@ class ApiClient {
 }
 
 module.exports = ApiClient;
+module.exports.TOOL_CALL_ID = TOOL_CALL_ID;
+module.exports.checkToolCallId = checkToolCallId;
 
 

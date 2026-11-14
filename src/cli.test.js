@@ -56,4 +56,37 @@ describe('CLI option parsing', () => {
   it('refuses the global -p after a command that has no -p', () => {
     expect(() => parse('trigger', '-p', 'proj_1')).toThrow(/unknownOption/);
   });
+
+  it('still requires --forward-to for tools itself', () => {
+    expect(() => parse('tools')).toThrow(/commander\.error/);
+    expect(() => parse('tools', '--print')).toThrow(/commander\.error/);
+  });
+
+  it('parses tools approve and reject (and its alias decline) without --forward-to', () => {
+    expect(parse('tools', 'approve', 'tc_1', '--end-user', 'user_812').calls.toolsApprove)
+      .toMatchObject({ callId: 'tc_1', endUser: 'user_812' });
+    expect(parse('tools', 'reject', 'tc_2', '--end-user', 'u 2').calls.toolsReject)
+      .toMatchObject({ callId: 'tc_2', endUser: 'u 2' });
+    expect(parse('tools', 'decline', 'tc_3', '--end-user', 'u3').calls.toolsReject)
+      .toMatchObject({ callId: 'tc_3', endUser: 'u3' });
+  });
+
+  it('requires --end-user to approve or reject, and a call id', () => {
+    expect(() => parse('tools', 'approve', 'tc_1')).toThrow(/missingMandatoryOptionValue/);
+    expect(() => parse('tools', 'reject', '--end-user', 'u')).toThrow(/missingArgument/);
+  });
+
+  it('parses tools show, with API options before or after the subcommand', () => {
+    expect(parse('tools', 'show', 'tc_1', '-k', 'mr_test_after').calls.toolsShow)
+      .toMatchObject({ callId: 'tc_1', apiKey: 'mr_test_after' });
+    expect(parse('tools', '-k', 'mr_test_before', '--api-url', 'http://localhost:4000', 'show', 'tc_1').calls.toolsShow)
+      .toMatchObject({ callId: 'tc_1', apiKey: 'mr_test_before', apiUrl: 'http://localhost:4000' });
+    expect(parse('-k', 'mr_test_global', 'tools', 'approve', 'tc_1', '--end-user', 'u').calls.toolsApprove)
+      .toMatchObject({ apiKey: 'mr_test_global' });
+  });
+
+  it('parses websocket --end-user and --cli-session', () => {
+    const { calls } = parse('websocket', '-w', 'wf', '--end-user', 'user_812', '--cli-session', 'cts_abc');
+    expect(calls.websocket).toMatchObject({ workflow: 'wf', endUser: 'user_812', cliSession: 'cts_abc' });
+  });
 });

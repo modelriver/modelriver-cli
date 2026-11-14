@@ -3,7 +3,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const { WebSocketServer } = require('ws');
-const { handleToolCall, describeResult, resolveApiKey, ToolCallRelay } = require('./tools');
+const { handleToolCall, describeResult, formatBody, toolLabel, resolveApiKey, ToolCallRelay } = require('./tools');
 const { Config } = require('../lib/config');
 const CLIWebSocketClient = require('../lib/cli-websocket-client');
 const { PushError } = CLIWebSocketClient;
@@ -111,6 +111,18 @@ describe('tools command: handleToolCall', () => {
     expect(out).toContain('R-123');
   });
 
+  it('prints what the model or the endpoint wrote as plain text: no control characters reach the terminal', () => {
+    const ESC = String.fromCharCode(27);
+    const CSI = String.fromCharCode(0x9b);
+    expect(formatBody(`${ESC}[2Jplain ${CSI}31m text`)).toBe('\\u001b[2Jplain \\u009b31m text');
+    expect(formatBody(JSON.stringify({ note: `a${CSI}b` }))).toBe('{\n  "note": "a\\u009bb"\n}');
+    expect(formatBody('{"ok":true}')).toBe('{\n  "ok": true\n}');
+
+    const line = describeResult({ tool: `get${ESC}[31m_weather`, effect: 'write' }, { status: 200, ms: 3 });
+    expect(line).toContain('get\\u001b[31m_weather [write] → 200 3ms');
+    expect(line).not.toContain(ESC);
+  });
+
   it('sends the error code with status 0 on timeout', async () => {
     const wsClient = fakeWs();
     await handleToolCall(call({ path: '/slow', timeout_ms: 100 }), { wsClient, topic: 't', origin });
@@ -172,6 +184,30 @@ describe('tools command: handleToolCall', () => {
     expect(describeResult('t', { status: 200, error: 'too_large', ms: 5 })).toMatch(/t → too_large \(HTTP 200\) 5ms/);
     expect(describeResult('t', { status: 0, error: 'timeout', ms: 5 })).toMatch(/t → timeout 5ms/);
   });
+
+  it('marks calls to a tool that changes something when the server sends effect "write"', async () => {
+    await handleToolCall(call({ tool: 'cancel_order', effect: 'write' }), { wsClient: fakeWs(), topic: 't', origin, print: true });
+    const out = printed();
+    expect(out).toMatch(/→ cancel_order \[write\] POST \/tools\/weather/);
+    expect(out).toMatch(/cancel_order \[write\] → 200 \d+ms/);
+  });
+
+  it('shows calls as before when effect is "read" or missing', async () => {
+    await handleToolCall(call({ effect: 'read' }), { wsClient: fakeWs(), topic: 't', origin });
+    await handleToolCall(call(), { wsClient: fakeWs(), topic: 't', origin });
+    const out = printed();
+    expect(out).not.toContain('[write]');
+    expect(out.match(/get_weather → 200 \d+ms/g)).toHaveLength(2);
+    expect(toolLabel({ tool: 'x', effect: 'other' })).toBe('x');
+    expect(describeResult({ tool: 'x', effect: 'write' }, { status: 200, ms: 1 })).toMatch(/x \[write\] → 200 1ms/);
+  });
+
+  it('forwards the body unchanged whatever the effect (the CLI never re-sends or alters a call)', async () => {
+    const wsClient = fakeWs();
+    await handleToolCall(call({ effect: 'write' }), { wsClient, topic: 't', origin });
+    expect(received.body).toBe(call().body);
+    expect(wsClient.push).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('ToolCallRelay: results across reconnects and Ctrl+C', () => {
@@ -179,12 +215,19 @@ describe('ToolCallRelay: results across reconnects and Ctrl+C', () => {
   let origin;
   let log;
   let err;
+  let slowClosed = 0;
+  let hits = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       req.resume();
       req.on('end', () => {
-        if (req.url.startsWith('/slow')) return; // never answers
+        hits.push(req.url);
+        if (req.url.startsWith('/slow')) {
+          // never answers; note when the CLI drops the connection
+          res.on('close', () => { slowClosed += 1; });
+          return;
+        }
         const wait = req.url.startsWith('/delay') ? 100 : 0;
         setTimeout(() => { res.writeHead(200); res.end('{"ok":true}'); }, wait);
       });
@@ -280,6 +323,126 @@ describe('ToolCallRelay: results across reconnects and Ctrl+C', () => {
     expect(relay.inFlight.size).toBe(0);
   });
 
+  it('treats {status: "already_answered"} as done: no warning, no resend', async () => {
+    const ws = fakeClient();
+    ws.push.mockImplementation(async () => ({ status: 'already_answered' }));
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    await relay.handle(call());
+    await relay.flush();
+    expect(ws.push).toHaveBeenCalledTimes(1);
+    expect(relay.inFlight.size).toBe(0);
+    const out = [...log.mock.calls, ...err.mock.calls].flat().join('\n');
+    expect(out).not.toMatch(/did not accept|already|no longer waiting/);
+  });
+
+  it('notes unknown_reply_ref quietly and never resends it, even if the channel is down by then', async () => {
+    const ws = fakeClient();
+    ws.push.mockImplementation(async () => {
+      ws.joined = false; // the socket drops while the server waited ~2 s
+      throw new PushError('refused', { reason: 'error', reply: { status: 'error', response: { reason: 'unknown_reply_ref' } } });
+    });
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    await relay.handle(call());
+    expect(relay.inFlight.size).toBe(0); // not queued for after a rejoin
+    ws.joined = true;
+    await relay.flush();
+    expect(ws.push).toHaveBeenCalledTimes(1);
+    const out = log.mock.calls.flat().join('\n');
+    expect(out).toMatch(/no longer waiting for the result of get_weather \(it timed out, or was not sent to this session\)/);
+    expect(out).not.toMatch(/did not accept/);
+  });
+
+  it('a result resent after a rejoin is done once the server answers already_answered', async () => {
+    const ws = fakeClient();
+    ws.push
+      .mockImplementationOnce(async () => {
+        ws.joined = false;
+        throw new PushError('WebSocket disconnected', { reason: 'disconnected' });
+      })
+      .mockImplementationOnce(async () => ({ status: 'already_answered' }));
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    await relay.handle(call());
+    ws.joined = true;
+    await relay.flush();
+    expect(ws.push).toHaveBeenCalledTimes(2);
+    expect(relay.inFlight.size).toBe(0);
+    expect(log.mock.calls.flat().join('\n')).not.toMatch(/did not accept/);
+  });
+
+  it('never forwards the same message twice (repeated reply_ref)', async () => {
+    hits = [];
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    const c = call({ reply_ref: 'rr_dup', call_id: 'tc_dup', path: '/dup' });
+    await Promise.all([relay.handle(c), relay.handle({ ...c })]);
+    await relay.handle({ ...c }); // again after it was answered
+    expect(hits.filter((u) => u === '/dup')).toHaveLength(1);
+    expect(ws.push).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls.flat().join('\n')).toMatch(/Ignored a repeated tool_call for get_weather \(call tc_dup\)/);
+  });
+
+  it('never forwards the same call_id twice, and answers the repeat with connection_failed', async () => {
+    hits = [];
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    await relay.handle(call({ reply_ref: 'rr_a', call_id: 'tc_same', path: '/same', effect: 'write' }));
+    const second = await relay.handle(call({ reply_ref: 'rr_b', call_id: 'tc_same', path: '/same', effect: 'write' }));
+    expect(hits.filter((u) => u === '/same')).toHaveLength(1);
+    expect(second).toMatchObject({ error: 'connection_failed', repeated: true });
+    expect(ws.push.mock.calls.map((c) => c[2])).toEqual([
+      { reply_ref: 'rr_a', status: 200, body: '{"ok":true}' },
+      { reply_ref: 'rr_b', error: 'connection_failed' },
+    ]);
+    expect(log.mock.calls.flat().join('\n')).toMatch(/Not forwarding get_weather \[write\] \(call tc_same\) again/);
+  });
+
+  it('warns that a write call that timed out locally may already have run', async () => {
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    await relay.handle(call({ reply_ref: 'rr_t', call_id: 'tc_t', tool: 'cancel_order', effect: 'write', path: '/slow', timeout_ms: 100 }));
+    const out = log.mock.calls.flat().join('\n');
+    expect(out).toMatch(/This tool changes something: the call may already have run/);
+    expect(ws.push.mock.calls[0][2]).toEqual({ reply_ref: 'rr_t', error: 'timeout' });
+  });
+
+  it('does not warn about a read call that timed out', async () => {
+    const relay = new ToolCallRelay({ wsClient: fakeClient(), topic: 't', origin });
+    await relay.handle(call({ reply_ref: 'rr_tr', effect: 'read', path: '/slow', timeout_ms: 100 }));
+    expect(log.mock.calls.flat().join('\n')).not.toMatch(/may already have run/);
+  });
+
+  it('on a takeover, aborts open local requests without replying and warns for write calls', async () => {
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    const closedBefore = slowClosed;
+    const pending = relay.handle(call({ reply_ref: 'rr_x', call_id: 'tc_x', tool: 'cancel_order', effect: 'write', path: '/slow', timeout_ms: 5000 }));
+    await waitFor(() => relay.inFlight.size === 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    relay.abortInFlight();
+    await expect(pending).resolves.toMatchObject({ error: 'connection_failed', aborted: true });
+    await waitFor(() => slowClosed > closedBefore);
+    expect(ws.push).not.toHaveBeenCalled();
+    const out = log.mock.calls.flat().join('\n');
+    expect(out).toMatch(/Stopped cancel_order \[write\] \(call tc_x\) before your server answered\./);
+    expect(out).toMatch(/may already have run on your server/);
+  });
+
+  it('a call that arrives after Ctrl+C is not forwarded, and is answered as not sent (never as a failed send)', async () => {
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    await relay.shutdown();
+    const before = hits.length;
+
+    const result = await relay.handle(call({ reply_ref: 'rr_late', call_id: 'tc_late', effect: 'write' }));
+
+    expect(hits.length).toBe(before); // nothing reached the local server
+    // target_refused: ModelRiver records the call as not sent. connection_failed
+    // would make a write call's outcome "unknown", as if it might have run.
+    expect(ws.push).toHaveBeenCalledWith('t', 'tool_result', { reply_ref: 'rr_late', error: 'target_refused' }, expect.anything());
+    expect(result).toMatchObject({ error: 'target_refused' });
+  });
+
   it('on Ctrl+C replies connection_failed for calls still being forwarded, within the cap', async () => {
     const ws = fakeClient();
     const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
@@ -292,8 +455,53 @@ describe('ToolCallRelay: results across reconnects and Ctrl+C', () => {
     expect(Date.now() - started).toBeLessThan(1000);
     expect(ws.push).toHaveBeenCalledWith('t', 'tool_result', { reply_ref: 'rr_slow', error: 'connection_failed' }, expect.any(Object));
 
-    await expect(pending).resolves.toMatchObject({ error: 'timeout' });
+    // The local request was aborted, not left to time out.
+    await expect(pending).resolves.toMatchObject({ error: 'connection_failed', aborted: true });
     expect(ws.push).toHaveBeenCalledTimes(1); // no second reply
+  });
+
+  it('on Ctrl+C aborts the local request and says a write call may already have run', async () => {
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    const closedBefore = slowClosed;
+    const pending = relay.handle(call({ reply_ref: 'rr_w', call_id: 'tc_w', tool: 'cancel_order', effect: 'write', path: '/slow', timeout_ms: 5000 }));
+    await waitFor(() => relay.inFlight.size === 1);
+    await new Promise((resolve) => setTimeout(resolve, 50)); // the request reaches the server
+
+    const started = Date.now();
+    await relay.shutdown(1000);
+    const result = await pending;
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(result).toMatchObject({ error: 'connection_failed', aborted: true });
+    await waitFor(() => slowClosed > closedBefore); // the local server saw the connection go
+
+    const out = log.mock.calls.flat().join('\n');
+    expect(out).toMatch(/Stopped cancel_order \[write\] \(call tc_w\)/);
+    expect(out).toMatch(/may already have run on your server/);
+    expect(out).toMatch(/unknown/);
+    expect(ws.push).toHaveBeenCalledWith('t', 'tool_result', { reply_ref: 'rr_w', error: 'connection_failed' }, expect.any(Object));
+  });
+
+  it('on Ctrl+C does not warn about a write for a read tool', async () => {
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    const pending = relay.handle(call({ reply_ref: 'rr_r', effect: 'read', path: '/slow', timeout_ms: 5000 }));
+    await waitFor(() => relay.inFlight.size === 1);
+    await relay.shutdown(1000);
+    await pending;
+    const out = log.mock.calls.flat().join('\n');
+    expect(out).toMatch(/Stopped get_weather \(call/);
+    expect(out).not.toMatch(/may already have run/);
+  });
+
+  it('on Ctrl+C without an effect from the server, says the call may have run if the tool changes something', async () => {
+    const ws = fakeClient();
+    const relay = new ToolCallRelay({ wsClient: ws, topic: 't', origin });
+    const pending = relay.handle(call({ reply_ref: 'rr_n', path: '/slow', timeout_ms: 5000 }));
+    await waitFor(() => relay.inFlight.size === 1);
+    await relay.shutdown(1000);
+    await pending;
+    expect(log.mock.calls.flat().join('\n')).toMatch(/If this tool changes something, the call may already have run/);
   });
 
   it('on Ctrl+C gives up after the cap when the server does not answer', async () => {

@@ -10,33 +10,56 @@ const {
 } = require('../lib/tool-forwarder');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
+const { plainText } = require('../utils/tool-approvals');
+const { maskSessionToken } = require('../utils/secrets');
+const ToolSessionStore = require('../lib/tool-session-store');
 
 const RESULT_PUSH_TIMEOUT_MS = 15000;
+// How many call ids and reply refs a session remembers, so a repeated
+// tool_call is never forwarded twice (oldest forgotten first).
+const SEEN_LIMIT = 10000;
 // How long Ctrl+C waits for the server to take the last replies.
 const SHUTDOWN_REPLY_CAP_MS = 1000;
 
 /**
  * Format a body for --print: pretty JSON when it parses, text otherwise.
+ * The model wrote the arguments and the endpoint wrote the result, so both
+ * are shown as plain text: control characters can't drive the terminal.
  */
 function formatBody(body) {
   if (body === null || body === undefined) return '(none)';
-  if (typeof body !== 'string') return Formatter.json(body);
+  if (typeof body !== 'string') return plainText(Formatter.json(body));
   try {
-    return Formatter.json(JSON.parse(body));
+    return plainText(Formatter.json(JSON.parse(body)));
   } catch (error) {
-    return body;
+    return plainText(body);
   }
 }
 
 /**
- * One output line per call: time, tool, status (or error), duration.
+ * The tool's name, marked when the server says the tool changes something.
+ * Calls without an `effect` (older servers) are shown as before.
+ * @param {object} call - tool_call payload
  */
-function describeResult(toolName, result) {
+function toolLabel(call) {
+  const name = plainText((call && call.tool) || '(unknown tool)');
+  return call && call.effect === 'write' ? `${name} [write]` : name;
+}
+
+/**
+ * One output line per call: time, tool, status (or error), duration.
+ * @param {string|object} toolOrCall - the tool name, or the tool_call payload
+ * @param {object} result
+ */
+function describeResult(toolOrCall, result) {
   const time = Formatter.timestamp(new Date());
+  const label = typeof toolOrCall === 'object' && toolOrCall !== null
+    ? toolLabel(toolOrCall)
+    : plainText(toolOrCall || '(unknown tool)');
   const outcome = result.error
     ? `${result.error}${result.status ? ` (HTTP ${result.status})` : ''}`
     : `${result.status}`;
-  return `[${time}] ${toolName || '(unknown tool)'} → ${outcome} ${result.ms}ms`;
+  return `[${time}] ${label} → ${outcome} ${result.ms}ms`;
 }
 
 /**
@@ -49,9 +72,12 @@ function describeResult(toolName, result) {
  */
 class ToolCallRelay {
   /**
-   * @param {object} ctx - {wsClient, topic, origin, print, lookup, now}
+   * @param {object} ctx - {wsClient, topic, origin, print, lookup, now,
+   *   forwarded, onForward}. `forwarded` lists call ids an earlier run of
+   *   this session already handed to the local server; `onForward(callId)`
+   *   is called before each new call is forwarded, so it can be saved.
    */
-  constructor({ wsClient, topic, origin, print = false, lookup, now = Date.now }) {
+  constructor({ wsClient, topic, origin, print = false, lookup, now = Date.now, forwarded = [], onForward = null }) {
     this.wsClient = wsClient;
     this.topic = topic;
     this.origin = origin;
@@ -59,7 +85,12 @@ class ToolCallRelay {
     this.lookup = lookup;
     this.now = now;
     this.stopping = false;
-    // reply_ref -> {call, deadline, state: forwarding|sending|queued|answered, reply, timer, sending}
+    // Every call_id and reply_ref this session has seen: a call is
+    // forwarded to the local server at most once.
+    this.seenCallIds = new Set(forwarded);
+    this.seenReplyRefs = new Set();
+    this.onForward = onForward;
+    // reply_ref -> {call, deadline, state: forwarding|sending|queued|answered, reply, timer, sending, controller}
     this.inFlight = new Map();
   }
 
@@ -80,32 +111,52 @@ class ToolCallRelay {
       return null;
     }
 
-    const entry = {
-      call,
-      deadline: this.now() + callTimeoutMs(call),
-      state: 'forwarding',
-      reply: null,
-      timer: null,
-      sending: null,
-    };
-    this.inFlight.set(call.reply_ref, entry);
+    // The same message again: the first copy answers it.
+    if (this.seenReplyRefs.has(call.reply_ref)) {
+      safely(() => Logger.warning(`Ignored a repeated tool_call for ${toolLabel(call)} (call ${call.call_id || '?'}); it was already forwarded.`));
+      return null;
+    }
+    remember(this.seenReplyRefs, call.reply_ref);
+
+    // The same call under a new reply_ref: never forward it twice. Answer
+    // without sending it, so the server doesn't wait for nothing.
+    if (typeof call.call_id === 'string' && call.call_id !== '') {
+      if (this.seenCallIds.has(call.call_id)) {
+        safely(() => Logger.warning(`Not forwarding ${toolLabel(call)} (call ${call.call_id}) again: this session already forwarded it once. Sent connection_failed.`));
+        const entry = this.track(call);
+        await this.send(entry, { reply_ref: call.reply_ref, error: 'connection_failed' });
+        return { status: 0, body: null, error: 'connection_failed', message: 'Repeated call, not forwarded', ms: 0, repeated: true };
+      }
+      remember(this.seenCallIds, call.call_id);
+    }
+
+    const entry = this.track(call);
 
     if (this.stopping) {
-      const result = { status: 0, body: null, error: 'connection_failed', message: 'The CLI is stopping', ms: 0 };
-      await this.send(entry, { reply_ref: call.reply_ref, error: 'connection_failed' });
+      // Not forwarded, so answered as refused: ModelRiver then records the
+      // call as not sent. connection_failed would mean "sent, no answer",
+      // which for a tool that changes something is recorded as unknown.
+      const result = { status: 0, body: null, error: 'target_refused', message: 'The CLI is stopping', ms: 0 };
+      await this.send(entry, { reply_ref: call.reply_ref, error: 'target_refused' });
       return result;
     }
 
     if (this.print) {
       safely(() => {
-        Logger.log(`\n→ ${call.tool || '(unknown tool)'} POST ${call.path} (call ${call.call_id || '?'})`);
+        Logger.log(`\n→ ${toolLabel(call)} POST ${plainText(call.path)} (call ${plainText(call.call_id || '?')})`);
         Logger.log(`  Arguments: ${formatBody(call.body)}`);
       });
     }
 
+    // Saved before the call leaves, so a CLI restarted on this session
+    // knows it went out and never forwards it again.
+    if (this.onForward && typeof call.call_id === 'string' && call.call_id !== '') {
+      safely(() => this.onForward(call.call_id));
+    }
+
     let result;
     try {
-      result = await forwardToolCall(call, { origin: this.origin, lookup: this.lookup });
+      result = await forwardToolCall(call, { origin: this.origin, lookup: this.lookup, signal: entry.controller.signal });
     } catch (error) {
       result = { status: 0, body: null, error: 'connection_failed', message: error.message, ms: 0 };
     }
@@ -124,8 +175,24 @@ class ToolCallRelay {
     return result;
   }
 
+  /** Start tracking a call until it is answered. */
+  track(call) {
+    const entry = {
+      call,
+      deadline: this.now() + callTimeoutMs(call),
+      state: 'forwarding',
+      reply: null,
+      timer: null,
+      sending: null,
+      // Ctrl+C (or a takeover) aborts the local request through this.
+      controller: new AbortController(),
+    };
+    this.inFlight.set(call.reply_ref, entry);
+    return entry;
+  }
+
   logResult(call, result) {
-    const line = describeResult(call.tool, result);
+    const line = describeResult(call, result);
     if (result.error) {
       Logger.error(line);
     } else if (result.status >= 200 && result.status < 300) {
@@ -133,10 +200,39 @@ class ToolCallRelay {
     } else {
       Logger.warning(line);
     }
-    if (result.message) Logger.log(`  ${result.message}`);
+    if (result.message) Logger.log(`  ${plainText(result.message)}`);
+    // A local timeout: the server may have done the work without answering.
+    if (result.error === 'timeout') warnMayHaveRun(call);
 
     if (this.print && result.body !== null && result.body !== undefined) {
       Logger.log(`  Result: ${formatBody(result.body)}`);
+    }
+  }
+
+  /**
+   * Ctrl+C stopped a call before the local server answered.
+   */
+  warnStopped(call, replied = true) {
+    Logger.warning(`  Stopped ${toolLabel(call)} (call ${call.call_id || '?'}) before your server answered${replied ? '; sent connection_failed' : ''}.`);
+    warnMayHaveRun(call);
+  }
+
+  /**
+   * Another connection took over the session: abort every local request
+   * still open (its channel is gone, so nothing is sent back) and say which
+   * calls may already have run.
+   */
+  abortInFlight() {
+    this.stopping = true;
+    for (const entry of [...this.inFlight.values()]) {
+      clearTimeout(entry.timer);
+      const forwarding = entry.state === 'forwarding';
+      entry.state = 'answered';
+      this.inFlight.delete(entry.call.reply_ref);
+      if (forwarding) {
+        entry.controller.abort();
+        safely(() => this.warnStopped(entry.call, false));
+      }
     }
   }
 
@@ -154,11 +250,21 @@ class ToolCallRelay {
     entry.state = 'sending';
     entry.sending = this.wsClient.push(this.topic, 'tool_result', reply, { timeoutMs: RESULT_PUSH_TIMEOUT_MS });
     try {
+      // {status: "received"}, or {status: "already_answered"} when ModelRiver
+      // already took a result for this call (a copy sent before a reconnect
+      // got there first). Either way the call is done.
       await entry.sending;
       this.complete(entry);
     } catch (error) {
       if (entry.state === 'answered') return;
       const reason = refusalReason(error);
+      if (reason === 'unknown_reply_ref') {
+        // The call is no longer waiting: it timed out, or was never sent to
+        // this session. Sending again can't help, so this is final.
+        Logger.log(`  ModelRiver is no longer waiting for the result of ${entry.call.tool || 'this call'} (it timed out, or was not sent to this session).`);
+        this.complete(entry);
+        return;
+      }
       const lostConnection = (error && error.reason === 'disconnected') || reason === 'unmatched topic';
       if (lostConnection || !this.canSend()) {
         // The socket closed (or the channel is rejoining) before the server
@@ -218,7 +324,8 @@ class ToolCallRelay {
 
   /**
    * Ctrl+C: answer what is still open, best effort, within capMs. Calls still
-   * being forwarded get {error: "connection_failed"}; kept results are sent.
+   * being forwarded have their local request aborted and get
+   * {error: "connection_failed"}; kept results are sent.
    * @param {number} [capMs]
    * @returns {Promise<void>}
    */
@@ -231,12 +338,18 @@ class ToolCallRelay {
         waits.push(entry.sending);
         continue;
       }
-      const reply = entry.state === 'forwarding'
+      const forwarding = entry.state === 'forwarding';
+      const reply = forwarding
         ? { reply_ref: entry.call.reply_ref, error: 'connection_failed' }
         : entry.reply;
       clearTimeout(entry.timer);
       entry.state = 'answered';
       this.inFlight.delete(entry.call.reply_ref);
+      if (forwarding) {
+        // Stop the local request first, so nothing more is read from it.
+        entry.controller.abort();
+        safely(() => this.warnStopped(entry.call));
+      }
       if (this.canSend()) {
         waits.push(this.wsClient.push(this.topic, 'tool_result', reply, { timeoutMs: capMs }));
       }
@@ -252,12 +365,46 @@ class ToolCallRelay {
   }
 }
 
+/**
+ * Say that a call which got no answer may still have run on the local
+ * server, unless the server says the tool only reads.
+ */
+function warnMayHaveRun(call) {
+  if (call.effect === 'write') {
+    Logger.warning('  This tool changes something: the call may already have run on your server. ' +
+      'ModelRiver records its outcome as unknown and never sends it again.');
+  } else if (call.effect !== 'read') {
+    // No effect from the server (older servers): it may be either kind.
+    Logger.warning('  If this tool changes something, the call may already have run on your server. ' +
+      'ModelRiver records its outcome as unknown and never sends it again.');
+  }
+}
+
+/** Add to a bounded set, forgetting the oldest entry when full. */
+function remember(set, value) {
+  set.add(value);
+  if (set.size > SEEN_LIMIT) set.delete(set.values().next().value);
+}
+
 function safely(fn) {
   try {
     fn();
   } catch (error) {
     // Output must never stop a reply from being sent.
   }
+}
+
+/**
+ * Why ModelRiver refused to (re)join the tool session, for people. The
+ * channel answers `unauthorized` for every reason, so all of them are named.
+ * @param {Error} error - from join()
+ * @returns {string|null} null when the join failed some other way
+ */
+function joinRefusedHint(error) {
+  if (refusalReason(error) !== 'unauthorized') return null;
+  return 'ModelRiver refused the tool session: hosted tools are turned off for this organization, ' +
+    'or the session has expired or belongs to another API key. ' +
+    'Run "modelriver tools" again; if it is refused again, ask for hosted tools to be turned on.';
 }
 
 /** The `reason` from a refused push's reply, if there is one. */
@@ -311,7 +458,7 @@ function resolveApiKey(flagKey, cfg = config) {
  * it to a server on this machine.
  */
 async function toolsCommand(options) {
-  const { apiUrl, forwardTo, print, verbose } = options;
+  const { apiUrl, forwardTo, print, verbose, newSession } = options;
 
   let apiKey;
   try {
@@ -360,12 +507,26 @@ async function toolsCommand(options) {
 
     const connectResponse = await apiClient.connectCLI();
 
-    spinner.text = 'Opening tool session...';
-    const session = await apiClient.createToolSession();
-    // The topic holds the session's database ID; the cts_ token is only sent
-    // in the join params, which the server checks.
-    const topic = session.channel;
-    const joinParams = { session_token: session.session_id };
+    // A session this machine opened earlier for the same API key and local
+    // server is joined again, so requests that name it keep working after a
+    // restart. Its token stays in the config folder and is never printed.
+    const store = new ToolSessionStore();
+    const storeKey = ToolSessionStore.keyFor({ apiUrl: apiClient.apiUrl, apiKey, origin: target.origin });
+    let saved = null;
+    if (!newSession) {
+      try {
+        saved = store.load(storeKey);
+      } catch (error) {
+        saved = null;
+      }
+    }
+
+    let session = null;
+    let reused = false;
+    if (!saved) {
+      spinner.text = 'Opening tool session...';
+      session = await apiClient.createToolSession();
+    }
 
     spinner.text = 'Connecting to WebSocket...';
     wsClient = new CLIWebSocketClient(connectResponse.websocket_url, connectResponse.ws_token, Boolean(verbose), {
@@ -375,15 +536,60 @@ async function toolsCommand(options) {
     });
     await wsClient.connect();
 
-    const relay = new ToolCallRelay({ wsClient, topic, origin: target.origin, print });
+    let warnedNotSaved = false;
+    const relay = new ToolCallRelay({
+      wsClient,
+      // The topic holds the session's database ID; the cts_ token is only
+      // sent in the join params, which the server checks.
+      topic: saved ? saved.channel : session.channel,
+      origin: target.origin,
+      print,
+      forwarded: saved ? saved.forwarded : [],
+      onForward: (callId) => {
+        try {
+          store.addForwarded(storeKey, callId);
+        } catch (error) {
+          if (!warnedNotSaved) {
+            warnedNotSaved = true;
+            Logger.warning(`> Could not record forwarded calls in ${store.file} (${error.message}). A restarted CLI won't know about calls this one forwarded.`);
+          }
+        }
+      },
+    });
 
     // Subscribe before joining: the server may send a tool_call right behind
     // the join reply, and it would be lost if nobody listened yet. Only calls
     // on this session's topic are handled.
     wsClient.on('tool_call', (call, callTopic) => {
-      if (callTopic !== topic) return;
+      if (relay.topic === null || callTopic !== relay.topic) return;
       relay.handle(call);
     });
+
+    if (saved) {
+      spinner.text = 'Rejoining your tool session...';
+      try {
+        await wsClient.join(saved.channel, { session_token: saved.session_id });
+        session = saved;
+        reused = true;
+      } catch (error) {
+        // "unauthorized": the session expired or was removed, or hosted tools
+        // was turned off. Anything else (a timeout) is a real failure.
+        if (refusalReason(error) !== 'unauthorized') throw error;
+        relay.topic = null;
+        spinner.stop();
+        Logger.warning(`> The saved tool session (${maskSessionToken(saved.session_id)}) can no longer be joined; opening a new one. Requests that named the old session need the new ID.`);
+        spinner.start();
+        spinner.text = 'Opening tool session...';
+        session = await apiClient.createToolSession();
+        // Forgotten only once a new session exists. If opening one fails too
+        // (hosted tools is off for the organization, say), the saved session
+        // is kept, so it can be rejoined when that is put right.
+        try { store.remove(storeKey); } catch (removeError) { /* nothing saved to remove */ }
+        relay.topic = session.channel;
+        relay.seenCallIds.clear();
+      }
+    }
+    const topic = session.channel;
 
     // Results kept while disconnected go out once the channel is back.
     wsClient.onClient('rejoin', (rejoined) => {
@@ -403,7 +609,21 @@ async function toolsCommand(options) {
 
     wsClient.onClient('rejoin_error', (failedTopic, error) => {
       if (failedTopic !== topic) return;
-      fail(`Could not rejoin the tool session (${error.message}). It may have expired; run "modelriver tools" again.`);
+      if (refusalReason(error) === 'unauthorized') {
+        try { store.remove(storeKey); } catch (removeError) { /* nothing saved to remove */ }
+      }
+      fail(joinRefusedHint(error) ||
+        `Could not rejoin the tool session (${error.message}). It may have expired; run "modelriver tools" again.`);
+    });
+
+    // One socket per session: when another connection joins this session,
+    // the server pushes `replaced` to this one and closes its channel. Stop,
+    // rather than rejoin and fight the newer connection for the session.
+    wsClient.on('replaced', (_payload, replacedTopic) => {
+      if (replacedTopic !== topic) return;
+      relay.abortInFlight();
+      fail('Another connection took over this tool session (another "modelriver tools" using the same session). ' +
+        'Tool calls now go there, so this one has stopped.');
     });
 
     wsClient.onClient('channel_close', (closedTopic) => {
@@ -411,14 +631,32 @@ async function toolsCommand(options) {
       fail('The server closed the tool session. Run "modelriver tools" again for a new one.');
     });
 
-    spinner.text = 'Joining tool channel...';
-    // join() keeps the params, so a rejoin after a reconnect sends them again.
-    await wsClient.join(topic, joinParams);
+    if (!reused) {
+      spinner.text = 'Joining tool channel...';
+      // join() keeps the params, so a rejoin after a reconnect sends them again.
+      await wsClient.join(topic, { session_token: session.session_id });
+      try {
+        // With the calls forwarded so far: one can arrive right behind the
+        // join, before this line runs.
+        store.save(storeKey, session, [...relay.seenCallIds]);
+      } catch (error) {
+        spinner.stop();
+        Logger.warning(`> Could not save the session in ${store.file} (${error.message}). A restarted CLI will open a new session.`);
+        spinner.start();
+      }
+    }
     started = true;
+    // A result that was ready before the join was complete goes out now.
+    relay.flush();
 
     spinner.succeed('Tool forwarding active');
 
-    Logger.success(`\n> Session: ${session.session_id}`);
+    if (reused) {
+      // Never printed in full again: it was shown once, when it was opened.
+      Logger.success(`\n> Session: ${maskSessionToken(session.session_id)} (rejoined: the session this machine already had)`);
+    } else {
+      Logger.success(`\n> Session: ${session.session_id}`);
+    }
     if (session.project_id) {
       Logger.info(`> Project: ${session.project_id}`);
     }
@@ -426,9 +664,19 @@ async function toolsCommand(options) {
       Logger.info(`> Expires: ${session.expires_at}`);
     }
     Logger.info(`> Forwarding tool calls to ${target.origin}`);
-    Logger.log('\nAdd this to a POST /v1/ai/async request to send its tool calls here:');
-    Logger.log(`  "tool_route": {"cli_session": "${session.session_id}"}`);
-    Logger.log('\nThe session ID works like a password while it is valid. Do not commit or share it.');
+    if (reused) {
+      Logger.log('\nRequests that already name this session in "tool_route" keep working; calls waiting for approval');
+      Logger.log('are sent here once approved. The session ID was printed when the session was opened.');
+      Logger.log('For a new session (and a new ID), start again with --new-session.');
+    } else {
+      Logger.log('\nAdd this to a POST /v1/ai/async request to send its tool calls here:');
+      Logger.log(`  "tool_route": {"cli_session": "${session.session_id}"}`);
+      Logger.log('Or send one and follow it (approvals included) from another terminal:');
+      Logger.log(`  modelriver websocket -w <workflow> -m "..." --end-user <id> --cli-session ${session.session_id}`);
+      Logger.log('\nThe session ID works like a password while it is valid. Do not commit or share it.');
+      Logger.log(`It is saved in ${store.file} (readable only by you), so starting "modelriver tools" again with the`);
+      Logger.log('same API key and --forward-to rejoins this session.');
+    }
     Logger.warning('> Press Ctrl+C to stop\n');
 
     let stopping = false;
@@ -448,16 +696,28 @@ async function toolsCommand(options) {
   } catch (error) {
     spinner.fail('Failed to start tool forwarding');
     Logger.error(error.message);
-    if (error.response?.status === 401) {
+    const joinHint = joinRefusedHint(error);
+    if (joinHint) {
+      Logger.warning(`> ${joinHint}`);
+    } else if (error.response?.status === 401) {
       Logger.warning('> Check your API key (modelriver login, or --api-key).');
     } else if (error.response?.status === 403 || error.response?.status === 404) {
       Logger.warning('> Hosted tools may not be enabled for this project, or the server does not support CLI tool sessions yet.');
     } else if (error.response?.status === 429) {
-      Logger.warning('> You already have 5 connected tool sessions for this project. Stop one and try again.');
+      // Either the session limit, or ModelRiver's rate limiter (another body).
+      const body = error.response.data && typeof error.response.data === 'object' ? error.response.data : {};
+      if (body.error === 'too_many_cli_tool_sessions') {
+        Logger.warning('> You already have 5 connected tool sessions for this project. Stop one and try again.');
+      } else {
+        const retry = body.retry_after ?? error.response.headers?.['retry-after'];
+        Logger.warning(retry !== undefined && retry !== null
+          ? `> Rate limited by ModelRiver. Try again in ${plainText(retry)} seconds.`
+          : '> Rate limited by ModelRiver. Try again shortly.');
+      }
     }
     if (wsClient) wsClient.close();
     process.exit(1);
   }
 }
 
-module.exports = { toolsCommand, handleToolCall, describeResult, resolveApiKey, ToolCallRelay };
+module.exports = { toolsCommand, handleToolCall, describeResult, formatBody, toolLabel, resolveApiKey, ToolCallRelay };

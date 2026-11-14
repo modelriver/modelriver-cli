@@ -186,6 +186,25 @@ describe('CLIWebSocketClient', () => {
     log.mockRestore();
   });
 
+  it('counts as joined the moment the join reply is handled, before a message right behind it', async () => {
+    server.onMessage = () => {}; // the test answers the join itself
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+    const seen = [];
+    client.on('tool_call', (_payload, topic) => seen.push(client.isJoined(topic)));
+
+    const joining = client.join('cli_tools:s1', { session_token: 'cts_1' });
+    await waitFor(() => server.messages.some((m) => m.event === 'phx_join'));
+    const join = server.messages.find((m) => m.event === 'phx_join');
+    // The reply and the next message handled back to back, as when both
+    // arrive in one read: join()'s caller has not run again in between.
+    client.handleMessage(JSON.stringify({ topic: join.topic, event: 'phx_reply', ref: join.ref, payload: { status: 'ok', response: {} } }));
+    client.handleMessage(JSON.stringify({ topic: join.topic, event: 'tool_call', ref: null, payload: {} }));
+    await joining;
+
+    expect(seen).toEqual([true]);
+  });
+
   it('reports a refused join with the server reason', async () => {
     server.onMessage = (msg, socket) => reply(socket, msg, 'error', { reason: 'unauthorized' });
     client = new CLIWebSocketClient(server.url, 'tok');
@@ -286,5 +305,78 @@ describe('CLIWebSocketClient', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(refreshToken).not.toHaveBeenCalled();
     expect(server.tokens).toEqual(['tok-1']);
+  });
+});
+
+describe('CLIWebSocketClient: WebSocket URL check', () => {
+  it('refuses a server-given ws:// URL for a host other than localhost, without connecting', async () => {
+    const client = new CLIWebSocketClient('ws://api.example.com/socket', 'tok');
+    await expect(client.connect()).rejects.toThrow(/must use wss/);
+    expect(client.ws).toBeNull();
+  });
+
+  it('treats a server-given ws:// URL for a modelriver.com host as wss://', () => {
+    const client = new CLIWebSocketClient('ws://api.modelriver.com:443/socket', 'tok');
+    expect(client.websocketUrl).toBe('wss://api.modelriver.com/socket');
+    expect(client.buildUrl()).toBe('wss://api.modelriver.com/socket/websocket?token=tok');
+  });
+
+  it('refuses a URL that is not ws or wss', async () => {
+    const client = new CLIWebSocketClient('https://api.example.com/socket', 'tok');
+    await expect(client.connect()).rejects.toThrow(/must use wss/);
+  });
+
+  it('keeps the old URL when a refreshed one is refused, and tries again', async () => {
+    const server = await startServer();
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let calls = 0;
+    const refreshToken = jest.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? { ws_token: 'tok-bad', websocket_url: 'ws://evil.example.com/socket' }
+        : { ws_token: 'tok-2', websocket_url: server.url };
+    });
+    const client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10, maxReconnectAttempts: 5 });
+    try {
+      await client.connect();
+      const reconnected = new Promise((resolve) => client.onClient('reconnect', resolve));
+      server.connections[0].terminate();
+      await reconnected;
+
+      expect(refreshToken).toHaveBeenCalledTimes(2);
+      // The refused answer's token was never used.
+      expect(server.tokens).toEqual(['tok-1', 'tok-2']);
+      expect(err.mock.calls.flat().join('\n')).toMatch(/must use wss/);
+    } finally {
+      client.close();
+      server.wss.close();
+      log.mockRestore();
+      err.mockRestore();
+    }
+  });
+});
+
+describe('CLIWebSocketClient: older sockets', () => {
+  it('ignores messages that still arrive on a socket it has replaced', async () => {
+    const server = await startServer();
+    const client = new CLIWebSocketClient(server.url, 'tok');
+    const seen = [];
+    client.on('replaced', (payload) => seen.push(payload));
+    try {
+      await client.connect();
+      const old = client.ws;
+      const frame = Buffer.from(JSON.stringify({ topic: 'cli_tools:s1', event: 'replaced', ref: null, payload: { reason: 'replaced' } }));
+      old.emit('message', frame);
+      expect(seen).toHaveLength(1);
+
+      client.ws = { readyState: 3 }; // a newer connection took its place
+      old.emit('message', frame);
+      expect(seen).toHaveLength(1);
+      client.ws = old;
+    } finally {
+      client.close();
+      server.wss.close();
+    }
   });
 });

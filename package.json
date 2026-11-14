@@ -49,6 +49,7 @@
   "files": [
     "bin/",
     "src/",
+    "tool-signature.js",
     "README.md",
     "!src/**/*.test.js",
     "!**/*.test.js"

@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const Logger = require('../utils/logger');
+const { checkWebSocketUrl, normalizeWebSocketUrl } = require('../utils/url-helpers');
 
 const DEFAULT_PUSH_TIMEOUT_MS = 10000;
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -41,7 +42,8 @@ class CLIWebSocketClient {
    * @param {number} [options.heartbeatIntervalMs]
    */
   constructor(websocketUrl, token, verbose = false, options = {}) {
-    this.websocketUrl = websocketUrl;
+    // ws:// on port 443 or a modelriver.com host means wss://
+    this.websocketUrl = normalizeWebSocketUrl(websocketUrl);
     this.token = token;
     this.verbose = verbose;
     this.refreshToken = options.refreshToken || null;
@@ -74,6 +76,8 @@ class CLIWebSocketClient {
   }
 
   buildUrl() {
+    // Throws unless the URL is wss (ws is allowed only for localhost).
+    checkWebSocketUrl(this.websocketUrl);
     // Phoenix WebSocket endpoint requires /websocket suffix for raw WebSocket connections
     let wsUrl = this.websocketUrl;
     if (!wsUrl.endsWith('/websocket')) {
@@ -89,7 +93,13 @@ class CLIWebSocketClient {
    */
   connect() {
     return new Promise((resolve, reject) => {
-      const url = this.buildUrl();
+      let url;
+      try {
+        url = this.buildUrl();
+      } catch (error) {
+        reject(error);
+        return;
+      }
 
       if (this.verbose) {
         Logger.info(`Connecting to WebSocket: ${url.split('?')[0]}`);
@@ -116,6 +126,9 @@ class CLIWebSocketClient {
       });
 
       ws.on('message', (data) => {
+        // A message still arriving on an older socket (one we have replaced
+        // with a new connection) is ignored: it must not act on this one.
+        if (this.ws !== ws) return;
         this.handleMessage(data);
       });
 
@@ -175,8 +188,12 @@ class CLIWebSocketClient {
     if (this.refreshToken) {
       try {
         const fresh = await this.refreshToken();
+        // Check a new URL before using it; a bad one keeps the old URL and
+        // counts as a failed attempt.
+        const freshUrl = fresh && fresh.websocket_url ? normalizeWebSocketUrl(fresh.websocket_url) : null;
+        if (freshUrl) checkWebSocketUrl(freshUrl);
         if (fresh && fresh.ws_token) this.token = fresh.ws_token;
-        if (fresh && fresh.websocket_url) this.websocketUrl = fresh.websocket_url;
+        if (freshUrl) this.websocketUrl = freshUrl;
       } catch (error) {
         Logger.error(`Could not get a new WebSocket token: ${error.message}`);
         this.scheduleReconnect();
@@ -384,6 +401,10 @@ class CLIWebSocketClient {
 
     const reply = msg.payload || {};
     if (reply.status === 'ok') {
+      // Joined from this moment. The server may send a message right behind
+      // the join reply, and it is handled before join()'s caller runs again:
+      // an answer to it must be sendable.
+      if (entry.event === 'phx_join') this.joined.add(entry.topic);
       entry.resolve(reply.response ?? {});
     } else {
       entry.reject(new PushError(
