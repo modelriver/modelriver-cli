@@ -1,4 +1,5 @@
 const WebSocket = require('ws');
+const { checkWebSocketUrl } = require('../utils/url-helpers');
 
 class WebSocketClient {
   constructor(websocketUrl, token, verbose = false) {
@@ -8,6 +9,7 @@ class WebSocketClient {
     this.ws = null;
     this.channel = null;
     this.listeners = {};
+    this.eventListeners = new Map(); // event -> handler(payload)
     this.heartbeatInterval = null;
     this.heartbeatRef = 0;
   }
@@ -18,6 +20,13 @@ class WebSocketClient {
    */
   connect() {
     return new Promise((resolve, reject) => {
+      try {
+        // Refuse a URL that isn't wss (ws is allowed only for localhost).
+        checkWebSocketUrl(this.websocketUrl);
+      } catch (error) {
+        reject(error);
+        return;
+      }
       const url = `${this.websocketUrl}/websocket?token=${encodeURIComponent(this.token)}`;
 
       this.ws = new WebSocket(url);
@@ -62,6 +71,8 @@ class WebSocketClient {
         this.ws.send(heartbeat);
       }
     }, 30000); // Every 30 seconds
+    // The heartbeat alone must not keep the process alive.
+    if (this.heartbeatInterval.unref) this.heartbeatInterval.unref();
   }
 
   /**
@@ -97,6 +108,7 @@ class WebSocketClient {
       });
 
       let resolved = false;
+      let joinTimer = null;
 
       // Set up a temporary listener for the join response
       // This will process the response and then be removed
@@ -108,6 +120,7 @@ class WebSocketClient {
           // Look for the join response (phx_reply with our ref)
           if (msg.event === 'phx_reply' && msg.ref === joinRef && msg.topic === channelName) {
             resolved = true;
+            clearTimeout(joinTimer);
             // Remove this listener - handleMessage() will continue processing other messages
             this.ws.removeListener('message', handleJoinResponse);
             
@@ -130,7 +143,7 @@ class WebSocketClient {
       this.ws.send(joinMsg);
 
       // Timeout after 10 seconds
-      setTimeout(() => {
+      joinTimer = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           this.ws.removeListener('message', handleJoinResponse);
@@ -164,8 +177,10 @@ class WebSocketClient {
           }
         }
       } else {
-        // In non-verbose mode, only log non-standard events
-        if (msg.event !== 'phx_reply' && msg.event !== 'heartbeat' && msg.event !== 'response') {
+        // In non-verbose mode, only log non-standard events (events with
+        // their own handler print themselves)
+        if (msg.event !== 'phx_reply' && msg.event !== 'heartbeat' && msg.event !== 'response' &&
+          !this.eventListeners.has(msg.event)) {
           Logger.info(`received event: ${msg.event} on topic: ${msg.topic}`);
         }
       }
@@ -180,6 +195,8 @@ class WebSocketClient {
         } else if (this.verbose) {
           Logger.warning(`⚠️  Response event received but no listener registered!`);
         }
+      } else if (this.eventListeners.has(msg.event)) {
+        this.eventListeners.get(msg.event)(msg.payload || {});
       } else if (msg.event === 'phx_reply') {
         // Handle join responses
         if (this.listeners.join) {
@@ -201,6 +218,15 @@ class WebSocketClient {
    */
   onResponse(callback) {
     this.listeners.response = callback;
+  }
+
+  /**
+   * Listen for one other server event (e.g. "tool_approval_required").
+   * @param {string} event
+   * @param {Function} callback - (payload) => void
+   */
+  onEvent(event, callback) {
+    this.eventListeners.set(event, callback);
   }
 
   /**

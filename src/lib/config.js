@@ -2,6 +2,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+const DEFAULT_API_URL = 'https://api.modelriver.com';
+const CONFIG_DIR_MODE = 0o700;
+const CONFIG_FILE_MODE = 0o600;
+// Keys a .modelriverrc in the current directory may not set. A checked-out
+// repository could otherwise send your API key to a server of its choosing.
+const LOCAL_RC_FORBIDDEN_KEYS = ['api_url', 'api-url'];
+
 class Config {
   constructor() {
     this.configFile = this.findConfigFile();
@@ -10,13 +17,13 @@ class Config {
 
   findConfigFile() {
     // Check for .modelriverrc in current directory
-    const localRc = path.join(process.cwd(), '.modelriverrc');
+    const localRc = this.getLocalRcPath();
     if (fs.existsSync(localRc)) {
       return localRc;
     }
 
     // Check for ~/.modelriver/config.json
-    const homeConfig = path.join(os.homedir(), '.modelriver', 'config.json');
+    const homeConfig = this.getHomeConfigPath();
     if (fs.existsSync(homeConfig)) {
       return homeConfig;
     }
@@ -29,12 +36,34 @@ class Config {
       return {};
     }
 
+    let loaded;
     try {
       const content = fs.readFileSync(this.configFile, 'utf8');
-      return JSON.parse(content);
+      loaded = JSON.parse(content);
     } catch (error) {
       return {};
     }
+    if (!loaded || typeof loaded !== 'object' || Array.isArray(loaded)) {
+      return {};
+    }
+
+    if (this.configFile === this.getLocalRcPath()) {
+      const ignored = LOCAL_RC_FORBIDDEN_KEYS.filter((key) => key in loaded);
+      if (ignored.length > 0) {
+        for (const key of ignored) delete loaded[key];
+        this.ignoredLocalKeys = ignored;
+        console.warn(
+          `⚠ Ignoring ${ignored.join(', ')} in ${this.configFile}: a .modelriverrc in the current ` +
+          'directory may not change the API URL. Use --api-url or MODELRIVER_API_URL instead.'
+        );
+      }
+    }
+
+    return loaded;
+  }
+
+  getLocalRcPath() {
+    return path.join(process.cwd(), '.modelriverrc');
   }
 
   get(key, defaultValue = null) {
@@ -46,7 +75,7 @@ class Config {
     }
 
     const configKey = key.replace(/-/g, '_');
-    if (this.config[configKey]) {
+    if (typeof this.config[configKey] === 'string' && this.config[configKey]) {
       return this.config[configKey].trim();
     }
 
@@ -57,16 +86,89 @@ class Config {
     return this.get('api-key') || this.get('api_key');
   }
 
+  /**
+   * The API key from MODELRIVER_API_KEY or <config dir>/config.json, never from
+   * a .modelriverrc in the current directory.
+   * @returns {{key: string, source: string}|null} source is the env var name or the file path
+   */
+  getTrustedApiKey() {
+    const fromEnv = process.env.MODELRIVER_API_KEY && process.env.MODELRIVER_API_KEY.trim();
+    if (fromEnv) return { key: fromEnv, source: 'MODELRIVER_API_KEY' };
+
+    const homePath = this.getHomeConfigPath();
+    let home = null;
+    try {
+      home = JSON.parse(fs.readFileSync(homePath, 'utf8'));
+    } catch (error) {
+      return null;
+    }
+    const key = home && typeof home === 'object' ? (home.api_key || home['api-key']) : null;
+    if (typeof key === 'string' && key.trim()) return { key: key.trim(), source: homePath };
+    return null;
+  }
+
+  /**
+   * The API key set by a .modelriverrc in the current directory, if one is in use.
+   * @returns {string|null}
+   */
+  getLocalRcApiKey() {
+    if (this.configFile !== this.getLocalRcPath()) return null;
+    const key = this.config.api_key || this.config['api-key'];
+    return typeof key === 'string' && key.trim() ? key.trim() : null;
+  }
+
   getProjectId() {
     return this.get('project-id') || this.get('project_id');
   }
 
+  /**
+   * The API URL saved by `modelriver login` in <config dir>/config.json, or
+   * null. Unlike getApiUrl(), it ignores MODELRIVER_API_URL, so login can
+   * show what is saved and warn when the variable overrides it.
+   * @returns {string|null}
+   */
+  getSavedApiUrl() {
+    try {
+      const home = JSON.parse(fs.readFileSync(this.getHomeConfigPath(), 'utf8'));
+      const url = home && typeof home === 'object' ? (home.api_url || home['api-url']) : null;
+      return typeof url === 'string' && url.trim() ? url.trim() : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * MODELRIVER_API_URL, else the URL saved in <config dir>/config.json, else
+   * production. Read from config.json even when a .modelriverrc is in use
+   * (the rc may not set it), so `login --api-url` works in any folder.
+   * @returns {string}
+   */
   getApiUrl() {
-    return this.get('api-url', 'https://api.modelriver.com') || this.get('api_url', 'https://api.modelriver.com');
+    const fromEnv = process.env.MODELRIVER_API_URL && process.env.MODELRIVER_API_URL.trim();
+    if (fromEnv) return fromEnv;
+    return this.getSavedApiUrl() || DEFAULT_API_URL;
   }
 
   getForwardUrl() {
     return this.get('forward-url') || this.get('forward_url');
+  }
+
+  /**
+   * MODELRIVER_FORWARD_URL, else the forward URL saved in
+   * <config dir>/config.json, or null. Never a .modelriverrc's: login offers
+   * it as the default and saves it to config.json, used in every folder.
+   * @returns {string|null}
+   */
+  getSavedForwardUrl() {
+    const fromEnv = process.env.MODELRIVER_FORWARD_URL && process.env.MODELRIVER_FORWARD_URL.trim();
+    if (fromEnv) return fromEnv;
+    try {
+      const home = JSON.parse(fs.readFileSync(this.getHomeConfigPath(), 'utf8'));
+      const url = home && typeof home === 'object' ? (home.forward_url || home['forward-url']) : null;
+      return typeof url === 'string' && url.trim() ? url.trim() : null;
+    } catch (error) {
+      return null;
+    }
   }
 
   getWebSocketUrl() {
@@ -79,25 +181,39 @@ class Config {
   }
 
   /**
-   * Get the path to the home config file
-   * @returns {string} - Path to ~/.modelriver/config.json
+   * The folder that holds config.json: MODELRIVER_CONFIG_DIR when set,
+   * otherwise ~/.modelriver. (The tests always set MODELRIVER_CONFIG_DIR.)
+   * @returns {string}
    */
-  getHomeConfigPath() {
-    return path.join(os.homedir(), '.modelriver', 'config.json');
+  getConfigDir() {
+    const override = process.env.MODELRIVER_CONFIG_DIR;
+    if (override && override.trim()) {
+      return path.resolve(override.trim());
+    }
+    return path.join(os.homedir(), '.modelriver');
   }
 
   /**
-   * Save configuration to ~/.modelriver/config.json
+   * Get the path to the home config file
+   * @returns {string} - Path to <config dir>/config.json (default ~/.modelriver/config.json)
+   */
+  getHomeConfigPath() {
+    return path.join(this.getConfigDir(), 'config.json');
+  }
+
+  /**
+   * Save configuration to <config dir>/config.json (default ~/.modelriver/config.json)
    * @param {object} configData - Configuration object to save
    */
   saveConfig(configData) {
-    const configDir = path.join(os.homedir(), '.modelriver');
+    const configDir = this.getConfigDir();
     const configPath = this.getHomeConfigPath();
 
-    // Create directory if it doesn't exist
+    // The folder is readable only by you (0700), the file too (0600).
     if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
+      fs.mkdirSync(configDir, { recursive: true, mode: CONFIG_DIR_MODE });
     }
+    fs.chmodSync(configDir, CONFIG_DIR_MODE);
 
     // Load existing config and merge
     let existingConfig = {};
@@ -113,8 +229,17 @@ class Config {
     // Merge with new config data
     const mergedConfig = { ...existingConfig, ...configData };
 
-    // Write to file
-    fs.writeFileSync(configPath, JSON.stringify(mergedConfig, null, 2), 'utf8');
+    // Write a new file with mode 0600 and move it into place, so the API key
+    // is never in a file other users can read, even for a moment.
+    const tmpPath = `${configPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(mergedConfig, null, 2), { encoding: 'utf8', mode: CONFIG_FILE_MODE, flag: 'wx' });
+      fs.chmodSync(tmpPath, CONFIG_FILE_MODE);
+      fs.renameSync(tmpPath, configPath);
+    } catch (error) {
+      try { fs.unlinkSync(tmpPath); } catch (cleanupError) { /* already gone */ }
+      throw error;
+    }
 
     // Reload config
     this.configFile = configPath;
@@ -133,5 +258,8 @@ class Config {
 }
 
 module.exports = new Config();
+module.exports.Config = Config;
+module.exports.CONFIG_DIR_MODE = CONFIG_DIR_MODE;
+module.exports.CONFIG_FILE_MODE = CONFIG_FILE_MODE;
 
 

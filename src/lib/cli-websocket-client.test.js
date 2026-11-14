@@ -1,0 +1,382 @@
+const { WebSocketServer } = require('ws');
+const CLIWebSocketClient = require('./cli-websocket-client');
+const { PushError } = CLIWebSocketClient;
+
+/**
+ * A small Phoenix-like server. `onMessage(msg, socket)` decides how to answer;
+ * the default replies ok to everything.
+ */
+function startServer() {
+  const state = {
+    connections: [],
+    messages: [],
+    tokens: [],
+    onMessage: (msg, socket) => reply(socket, msg, 'ok', {}),
+  };
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  wss.on('connection', (socket, req) => {
+    state.tokens.push(new URL(req.url, 'http://x').searchParams.get('token'));
+    state.connections.push(socket);
+    socket.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      state.messages.push(msg);
+      state.onMessage(msg, socket);
+    });
+  });
+  return new Promise((resolve) => wss.on('listening', () => {
+    state.wss = wss;
+    state.url = `ws://127.0.0.1:${wss.address().port}/cli`;
+    resolve(state);
+  }));
+}
+
+function reply(socket, msg, status, response) {
+  socket.send(JSON.stringify({ topic: msg.topic, event: 'phx_reply', ref: msg.ref, payload: { status, response } }));
+}
+
+function waitFor(check, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = () => {
+      const value = check();
+      if (value) return resolve(value);
+      if (Date.now() - started > timeoutMs) return reject(new Error('waitFor timed out'));
+      setTimeout(tick, 10);
+    };
+    tick();
+  });
+}
+
+describe('CLIWebSocketClient', () => {
+  let server;
+  let client;
+
+  beforeEach(async () => {
+    server = await startServer();
+  });
+
+  afterEach(async () => {
+    if (client) client.close();
+    client = null;
+    for (const socket of server.connections) socket.terminate();
+    await new Promise((resolve) => server.wss.close(resolve));
+  });
+
+  it('connects to <url>/websocket with the token', async () => {
+    client = new CLIWebSocketClient(server.url, 'tok-1');
+    await client.connect();
+    expect(server.tokens).toEqual(['tok-1']);
+  });
+
+  it('gives every push a unique ref and settles each by its own reply', async () => {
+    const held = [];
+    server.onMessage = (msg, socket) => held.push({ msg, socket });
+
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+
+    const a = client.push('cli_tools:s1', 'tool_result', { n: 1 });
+    const b = client.push('cli_tools:s1', 'tool_result', { n: 2 });
+    const c = client.push('cli_tools:s1', 'tool_result', { n: 3 });
+
+    await waitFor(() => held.length === 3);
+    const refs = held.map((h) => h.msg.ref);
+    expect(new Set(refs).size).toBe(3);
+
+    // Answer out of order; each promise gets its own reply.
+    for (const { msg, socket } of [held[2], held[0], held[1]]) {
+      reply(socket, msg, 'ok', { echo: msg.payload.n });
+    }
+
+    await expect(a).resolves.toEqual({ echo: 1 });
+    await expect(b).resolves.toEqual({ echo: 2 });
+    await expect(c).resolves.toEqual({ echo: 3 });
+    expect(client.pending.size).toBe(0);
+  });
+
+  it('ignores replies with an unknown ref or the wrong topic', async () => {
+    let socketRef;
+    server.onMessage = (msg, socket) => {
+      socketRef = socket;
+      socket.send(JSON.stringify({ topic: msg.topic, event: 'phx_reply', ref: '999', payload: { status: 'ok', response: 'wrong ref' } }));
+      socket.send(JSON.stringify({ topic: 'other:topic', event: 'phx_reply', ref: msg.ref, payload: { status: 'ok', response: 'wrong topic' } }));
+      reply(socket, msg, 'ok', 'right');
+    };
+
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+    await expect(client.push('cli_tools:s1', 'tool_result', {})).resolves.toBe('right');
+    expect(socketRef).toBeDefined();
+  });
+
+  it('rejects with PushError holding the reply when the server answers error', async () => {
+    server.onMessage = (msg, socket) => reply(socket, msg, 'error', { reason: 'unknown_reply_ref' });
+
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+
+    const error = await client.push('cli_tools:s1', 'tool_result', {}).catch((e) => e);
+    expect(error).toBeInstanceOf(PushError);
+    expect(error.reason).toBe('error');
+    expect(error.reply).toEqual({ status: 'error', response: { reason: 'unknown_reply_ref' } });
+    expect(error.message).toMatch(/unknown_reply_ref/);
+  });
+
+  it('rejects on timeout and forgets the ref', async () => {
+    server.onMessage = () => {};
+
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+
+    const error = await client.push('cli_tools:s1', 'tool_result', {}, { timeoutMs: 50 }).catch((e) => e);
+    expect(error).toBeInstanceOf(PushError);
+    expect(error.reason).toBe('timeout');
+    expect(client.pending.size).toBe(0);
+  });
+
+  it('rejects at once when not connected', async () => {
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await expect(client.push('t', 'e', {})).rejects.toMatchObject({ reason: 'disconnected' });
+  });
+
+  it('joins several topics and routes events to handlers', async () => {
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+    await client.join('cli_webhooks:u1');
+    await client.join('cli_tools:s1', { a: 1 });
+
+    expect([...client.topics.keys()]).toEqual(['cli_webhooks:u1', 'cli_tools:s1']);
+    const joins = server.messages.filter((m) => m.event === 'phx_join');
+    expect(joins.map((m) => m.topic)).toEqual(['cli_webhooks:u1', 'cli_tools:s1']);
+    expect(joins[1].payload).toEqual({ a: 1 });
+
+    const seen = [];
+    client.on('tool_call', (payload, topic) => seen.push({ payload, topic }));
+    const webhooks = [];
+    client.onWebhook((payload) => webhooks.push(payload));
+
+    const socket = server.connections[0];
+    socket.send(JSON.stringify({ topic: 'cli_tools:s1', event: 'tool_call', ref: null, payload: { call_id: 'c1' } }));
+    socket.send(JSON.stringify({ topic: 'cli_webhooks:u1', event: 'webhook', ref: null, payload: { channel_id: 'ch' } }));
+
+    await waitFor(() => seen.length === 1 && webhooks.length === 1);
+    expect(seen[0]).toEqual({ payload: { call_id: 'c1' }, topic: 'cli_tools:s1' });
+    expect(webhooks[0]).toEqual({ channel_id: 'ch' });
+  });
+
+  it('sends the join params (session_token) in phx_join, and again on rejoin after a reconnect', async () => {
+    const refreshToken = jest.fn(async () => ({ ws_token: 'tok-2' }));
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10 });
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    await client.connect();
+    await client.join('cli_tools:6f1d-uuid', { session_token: 'cts_secret_token' });
+
+    const firstJoin = server.messages.find((m) => m.event === 'phx_join');
+    expect(firstJoin).toMatchObject({ topic: 'cli_tools:6f1d-uuid', payload: { session_token: 'cts_secret_token' } });
+
+    const reconnected = new Promise((resolve) => client.onClient('reconnect', resolve));
+    server.connections[0].terminate();
+    await reconnected;
+    await waitFor(() => server.messages.filter((m) => m.event === 'phx_join').length === 2);
+
+    const rejoin = server.messages.filter((m) => m.event === 'phx_join')[1];
+    expect(rejoin).toMatchObject({ topic: 'cli_tools:6f1d-uuid', payload: { session_token: 'cts_secret_token' } });
+    expect(server.tokens).toEqual(['tok-1', 'tok-2']);
+    log.mockRestore();
+  });
+
+  it('counts as joined the moment the join reply is handled, before a message right behind it', async () => {
+    server.onMessage = () => {}; // the test answers the join itself
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+    const seen = [];
+    client.on('tool_call', (_payload, topic) => seen.push(client.isJoined(topic)));
+
+    const joining = client.join('cli_tools:s1', { session_token: 'cts_1' });
+    await waitFor(() => server.messages.some((m) => m.event === 'phx_join'));
+    const join = server.messages.find((m) => m.event === 'phx_join');
+    // The reply and the next message handled back to back, as when both
+    // arrive in one read: join()'s caller has not run again in between.
+    client.handleMessage(JSON.stringify({ topic: join.topic, event: 'phx_reply', ref: join.ref, payload: { status: 'ok', response: {} } }));
+    client.handleMessage(JSON.stringify({ topic: join.topic, event: 'tool_call', ref: null, payload: {} }));
+    await joining;
+
+    expect(seen).toEqual([true]);
+  });
+
+  it('reports a refused join with the server reason', async () => {
+    server.onMessage = (msg, socket) => reply(socket, msg, 'error', { reason: 'unauthorized' });
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+    await expect(client.join('cli_tools:s1', { session_token: 'cts_x' })).rejects.toThrow('Failed to join channel: unauthorized');
+    expect(client.topics.size).toBe(0);
+  });
+
+  it('keeps joinChannel working for existing callers', async () => {
+    client = new CLIWebSocketClient(server.url, 'tok');
+    await client.connect();
+    await client.joinChannel('cli_webhooks:u1');
+    expect(client.channel).toBe('cli_webhooks:u1');
+  });
+
+  it('on reconnect, fetches a fresh token and rejoins every topic', async () => {
+    const refreshToken = jest.fn(async () => ({ ws_token: 'tok-2', websocket_url: server.url }));
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, {
+      refreshToken,
+      reconnectDelayMs: 10,
+      maxReconnectAttempts: 3,
+    });
+    const warn = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    await client.connect();
+    await client.join('cli_webhooks:u1');
+    await client.join('cli_tools:s1');
+
+    // A push in flight when the socket drops is rejected, not left hanging.
+    server.onMessage = (msg, socket) => {
+      if (msg.event === 'tool_result') return;
+      reply(socket, msg, 'ok', {});
+    };
+    const inFlight = client.push('cli_tools:s1', 'tool_result', {});
+    await waitFor(() => server.messages.some((m) => m.event === 'tool_result'));
+
+    const reconnected = new Promise((resolve) => client.onClient('reconnect', resolve));
+    server.connections[0].terminate();
+
+    await expect(inFlight).rejects.toMatchObject({ reason: 'disconnected' });
+    await reconnected;
+    await waitFor(() => server.messages.filter((m) => m.event === 'phx_join').length === 4);
+
+    expect(refreshToken).toHaveBeenCalledTimes(1);
+    expect(server.tokens).toEqual(['tok-1', 'tok-2']);
+    const rejoined = server.messages.filter((m) => m.event === 'phx_join').slice(2).map((m) => m.topic);
+    expect(rejoined.sort()).toEqual(['cli_tools:s1', 'cli_webhooks:u1']);
+
+    // Refs keep increasing across the reconnect.
+    const refs = server.messages.map((m) => Number(m.ref));
+    expect(new Set(refs).size).toBe(refs.length);
+    warn.mockRestore();
+  });
+
+  it('tracks joined topics and emits rejoin after a reconnect', async () => {
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, {
+      refreshToken: async () => ({ ws_token: 'tok-2' }),
+      reconnectDelayMs: 10,
+    });
+    await client.connect();
+    expect(client.isJoined('cli_tools:s1')).toBe(false);
+    await client.join('cli_tools:s1', { session_token: 'cts_x' });
+    expect(client.isJoined('cli_tools:s1')).toBe(true);
+
+    const closes = [];
+    client.onClient('close', (...args) => closes.push(args));
+    const rejoined = new Promise((resolve) => client.onClient('rejoin', resolve));
+    server.connections[0].terminate();
+    await waitFor(() => closes.length === 1);
+    expect(client.isJoined('cli_tools:s1')).toBe(false);
+    expect(closes[0][2]).toBe(true); // will reconnect
+
+    await expect(rejoined).resolves.toBe('cli_tools:s1');
+    expect(client.isJoined('cli_tools:s1')).toBe(true);
+    log.mockRestore();
+  });
+
+  it('reports a normal (1000) close from the server as final and does not reconnect', async () => {
+    const refreshToken = jest.fn(async () => ({ ws_token: 'tok-2' }));
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10 });
+    await client.connect();
+    await client.join('cli_tools:s1');
+
+    const closed = new Promise((resolve) => client.onClient('close', (...args) => resolve(args)));
+    server.connections[0].close(1000, 'bye');
+    await expect(closed).resolves.toEqual([1000, 'bye', false]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(refreshToken).not.toHaveBeenCalled();
+    expect(client.isJoined('cli_tools:s1')).toBe(false);
+  });
+
+  it('does not reconnect after close()', async () => {
+    const refreshToken = jest.fn(async () => ({ ws_token: 'tok-2' }));
+    client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10 });
+    await client.connect();
+    client.close();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(refreshToken).not.toHaveBeenCalled();
+    expect(server.tokens).toEqual(['tok-1']);
+  });
+});
+
+describe('CLIWebSocketClient: WebSocket URL check', () => {
+  it('refuses a server-given ws:// URL for a host other than localhost, without connecting', async () => {
+    const client = new CLIWebSocketClient('ws://api.example.com/socket', 'tok');
+    await expect(client.connect()).rejects.toThrow(/must use wss/);
+    expect(client.ws).toBeNull();
+  });
+
+  it('treats a server-given ws:// URL for a modelriver.com host as wss://', () => {
+    const client = new CLIWebSocketClient('ws://api.modelriver.com:443/socket', 'tok');
+    expect(client.websocketUrl).toBe('wss://api.modelriver.com/socket');
+    expect(client.buildUrl()).toBe('wss://api.modelriver.com/socket/websocket?token=tok');
+  });
+
+  it('refuses a URL that is not ws or wss', async () => {
+    const client = new CLIWebSocketClient('https://api.example.com/socket', 'tok');
+    await expect(client.connect()).rejects.toThrow(/must use wss/);
+  });
+
+  it('keeps the old URL when a refreshed one is refused, and tries again', async () => {
+    const server = await startServer();
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    let calls = 0;
+    const refreshToken = jest.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? { ws_token: 'tok-bad', websocket_url: 'ws://evil.example.com/socket' }
+        : { ws_token: 'tok-2', websocket_url: server.url };
+    });
+    const client = new CLIWebSocketClient(server.url, 'tok-1', false, { refreshToken, reconnectDelayMs: 10, maxReconnectAttempts: 5 });
+    try {
+      await client.connect();
+      const reconnected = new Promise((resolve) => client.onClient('reconnect', resolve));
+      server.connections[0].terminate();
+      await reconnected;
+
+      expect(refreshToken).toHaveBeenCalledTimes(2);
+      // The refused answer's token was never used.
+      expect(server.tokens).toEqual(['tok-1', 'tok-2']);
+      expect(err.mock.calls.flat().join('\n')).toMatch(/must use wss/);
+    } finally {
+      client.close();
+      server.wss.close();
+      log.mockRestore();
+      err.mockRestore();
+    }
+  });
+});
+
+describe('CLIWebSocketClient: older sockets', () => {
+  it('ignores messages that still arrive on a socket it has replaced', async () => {
+    const server = await startServer();
+    const client = new CLIWebSocketClient(server.url, 'tok');
+    const seen = [];
+    client.on('replaced', (payload) => seen.push(payload));
+    try {
+      await client.connect();
+      const old = client.ws;
+      const frame = Buffer.from(JSON.stringify({ topic: 'cli_tools:s1', event: 'replaced', ref: null, payload: { reason: 'replaced' } }));
+      old.emit('message', frame);
+      expect(seen).toHaveLength(1);
+
+      client.ws = { readyState: 3 }; // a newer connection took its place
+      old.emit('message', frame);
+      expect(seen).toHaveLength(1);
+      client.ws = old;
+    } finally {
+      client.close();
+      server.wss.close();
+    }
+  });
+});

@@ -1,5 +1,10 @@
-const chalk = require('chalk');
-const ora = require('ora');
+// chalk 6 and ora 10 are ESM-only. Node 22.12+ can require() them; the
+// exports then sit on `.default`.
+const chalkModule = require('chalk');
+const oraModule = require('ora');
+
+const chalk = chalkModule.default || chalkModule;
+const ora = oraModule.default || oraModule;
 
 class Logger {
   static success(message) {
@@ -23,9 +28,7 @@ class Logger {
   }
 
   static spinner(message) {
-    // Handle both CommonJS and ESM exports
-    const oraInstance = typeof ora === 'function' ? ora : (ora.default || ora);
-    return oraInstance(message);
+    return ora(message);
   }
 
   static section(title) {
@@ -35,5 +38,3 @@ class Logger {
 }
 
 module.exports = Logger;
-
-

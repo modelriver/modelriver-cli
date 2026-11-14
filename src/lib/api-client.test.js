@@ -84,7 +84,7 @@ describe('ApiClient', () => {
 
         it('should use /api/v1 for non-production URLs', () => {
             const ApiClient = require('./api-client');
-            const client = new ApiClient('mr_live_test123', 'http://my-dev-server.local');
+            const client = new ApiClient('mr_live_test123', 'https://my-dev-server.local');
 
             expect(client.apiPath).toBe('/api/v1');
         });
@@ -96,6 +96,117 @@ describe('ApiClient', () => {
             const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com/');
 
             expect(client.apiUrl).toBe('https://api.modelriver.com');
+        });
+    });
+
+    describe('API URL scheme', () => {
+        it.each(['http://localhost:4000', 'http://127.0.0.1:4000', 'http://[::1]:4000', 'https://api.modelriver.com'])(
+            'accepts %s',
+            (url) => {
+                const ApiClient = require('./api-client');
+                expect(() => new ApiClient('mr_live_test123', url)).not.toThrow();
+            }
+        );
+
+        it.each(['http://api.modelriver.com', 'http://my-dev-server.local', 'http://10.0.0.5:4000', 'ftp://localhost', 'not-a-url'])(
+            'refuses %s',
+            (url) => {
+                const ApiClient = require('./api-client');
+                expect(() => new ApiClient('mr_live_test123', url)).toThrow(/API URL/);
+            }
+        );
+    });
+
+    describe('secrets in debug output', () => {
+        it('never prints the API key or a prefix of it', async () => {
+            process.env.DEBUG = '1';
+            const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+            const ApiClient = require('./api-client');
+            const key = 'mr_live_abcdefghijklmnopqrstuvwxyz0123456789';
+            const client = new ApiClient(key, 'https://api.modelriver.com');
+            client.client.post = jest.fn(async () => ({ status: 200, data: { ws_token: 't' } }));
+            await client.connectCLI();
+
+            const printed = log.mock.calls.flat().join('\n');
+            expect(printed).not.toContain(key.slice(8, 20));
+            log.mockRestore();
+        });
+    });
+
+    describe('createToolSession', () => {
+        it('POSTs to <apiPath>/cli/tool-sessions and returns the session', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+            const session = { session_id: 'cts_abc', expires_at: '2026-11-15T00:00:00Z', channel: 'cli_tools:2b6f0c1e-uuid', project_id: 'p1' };
+            client.client.post = jest.fn(async () => ({ status: 201, data: session }));
+
+            await expect(client.createToolSession()).resolves.toEqual(session);
+            expect(client.client.post).toHaveBeenCalledWith('/v1/cli/tool-sessions', {});
+        });
+
+        it('uses /api/v1 on localhost', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'http://localhost:4000');
+            client.client.post = jest.fn(async () => ({ status: 201, data: { session_id: 'cts_1', channel: 'cli_tools:u1' } }));
+            await client.createToolSession();
+            expect(client.client.post).toHaveBeenCalledWith('/api/v1/cli/tool-sessions', {});
+        });
+
+        it('reports server errors', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+            client.client.post = jest.fn(async () => ({ status: 404, data: { error: 'hosted_tools_unavailable', message: 'Hosted tools are not available for this organization.' } }));
+            await expect(client.createToolSession()).rejects.toThrow('Failed to open tool session: Hosted tools are not available for this organization.');
+        });
+
+        it('rejects a reply without a session_id', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+            client.client.post = jest.fn(async () => ({ status: 200, data: {} }));
+            await expect(client.createToolSession()).rejects.toThrow(/session_id/);
+        });
+
+        it('rejects a reply without a cli_tools channel', async () => {
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+            client.client.post = jest.fn(async () => ({ status: 201, data: { session_id: 'cts_1' } }));
+            await expect(client.createToolSession()).rejects.toThrow(/cli_tools channel/);
+        });
+    });
+
+    describe('sendCallback', () => {
+        it('refuses to send the API key to another host', async () => {
+            const axios = require('axios');
+            const post = jest.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+
+            await expect(client.sendCallback('https://attacker.example.com/v1/callback/abc', {}))
+                .rejects.toThrow(/Refusing to send your API key to https:\/\/attacker\.example\.com/);
+            await expect(client.sendCallback('http://api.modelriver.com/v1/callback/abc', {}))
+                .rejects.toThrow(/Refusing/);
+            await expect(client.sendCallback('https://api.modelriver.com.attacker.example/v1/callback/abc', {}))
+                .rejects.toThrow(/Refusing/);
+            expect(post).not.toHaveBeenCalled();
+            post.mockRestore();
+        });
+
+        it('sends to the configured API host without following redirects', async () => {
+            const axios = require('axios');
+            const post = jest.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { ok: true } });
+            const ApiClient = require('./api-client');
+            const client = new ApiClient('mr_live_test123', 'https://api.modelriver.com');
+
+            await client.sendCallback('https://api.modelriver.com/v1/callback/abc', { data: {} });
+            expect(post).toHaveBeenCalledWith(
+                'https://api.modelriver.com/v1/callback/abc',
+                { data: {} },
+                expect.objectContaining({
+                    headers: expect.objectContaining({ Authorization: 'Bearer mr_live_test123' }),
+                    maxRedirects: 0,
+                })
+            );
+            post.mockRestore();
         });
     });
 });
