@@ -41,14 +41,14 @@ function getCustomerData(data) {
   return Object.keys(customerData).length > 0 ? customerData : null;
 }
 
-function buildCallbackHint(callbackUrl, channelId, apiKey) {
+// `_apiKey` is accepted for older callers but never printed: the hint always
+// refers to $MODELRIVER_API_KEY so no part of the key ends up in terminal logs.
+function buildCallbackHint(callbackUrl, channelId, _apiKey) {
   if (!callbackUrl && !channelId) {
     return null;
   }
 
-  const keyHint = apiKey
-    ? `${apiKey.substring(0, 12)}...`
-    : '$MODELRIVER_API_KEY';
+  const keyHint = '$MODELRIVER_API_KEY';
 
   const lines = [
     '> Event-driven webhook — complete the flow with a callback:',
@@ -121,13 +121,16 @@ function printWebhookDetails(webhookPayload, options = {}) {
     }
   } else {
     if (signature && webhookSecret && data) {
-      const isValid = WebhookVerifier.verify(
+      const result = WebhookVerifier.check(
         signature,
         data,
         webhookSecret,
         String(timestamp)
       );
-      Logger.log(`  Signature: ${isValid ? '✓ Valid' : '✗ Invalid'}`);
+      let label = '✗ Invalid';
+      if (result.valid) label = '✓ Valid';
+      else if (result.signatureValid) label = '✗ Timestamp more than 5 minutes off';
+      Logger.log(`  Signature: ${label}`);
     }
 
     if (data?.data) {

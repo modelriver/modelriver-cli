@@ -71,19 +71,22 @@ async function verifyWebhook(options) {
     // Extract data from payload (webhook format)
     const webhookData = payloadData.data || payloadData;
 
-    // Verify signature
-    const isValid = WebhookVerifier.verify(
+    // Verify signature and timestamp (no more than 5 minutes off)
+    const result = WebhookVerifier.check(
       signature,
       webhookData,
       secret,
       timestamp
     );
 
-    if (isValid) {
-      Logger.success('✓ Signature is valid');
+    if (result.valid) {
+      Logger.success('Signature is valid');
       process.exit(0);
+    } else if (result.signatureValid) {
+      Logger.error('Signature matches, but the timestamp is more than 5 minutes from now, so a receiver must reject it');
+      process.exit(1);
     } else {
-      Logger.error('✗ Signature is invalid');
+      Logger.error('Signature is invalid');
       process.exit(1);
     }
 

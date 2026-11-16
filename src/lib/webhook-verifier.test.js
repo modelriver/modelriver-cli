@@ -1,8 +1,9 @@
+const crypto = require('crypto');
 const WebhookVerifier = require('./webhook-verifier');
 
 describe('WebhookVerifier', () => {
     const secret = 'test-secret-key-12345';
-    const timestamp = '1704825600';
+    const timestamp = String(Math.floor(Date.now() / 1000));
     const payload = { status: 'success', name: 'Test User' };
 
     describe('generateSignature', () => {
@@ -31,7 +32,7 @@ describe('WebhookVerifier', () => {
 
         it('should produce different signatures for different timestamps', () => {
             const sig1 = WebhookVerifier.generateSignature(payload, secret, timestamp);
-            const sig2 = WebhookVerifier.generateSignature(payload, secret, '1704825601');
+            const sig2 = WebhookVerifier.generateSignature(payload, secret, String(Number(timestamp) + 1));
 
             expect(sig1).not.toBe(sig2);
         });
@@ -68,7 +69,53 @@ describe('WebhookVerifier', () => {
         });
     });
 
+    describe('timestamp window', () => {
+        const now = 1_763_100_000_000; // ms
+        const nowSeconds = String(now / 1000);
+        const sign = (ts) => WebhookVerifier.generateSignature(payload, secret, ts);
+
+        it('accepts a timestamp up to 5 minutes old or ahead', () => {
+            for (const offset of [0, -300, 300, -299, 120]) {
+                const ts = String(now / 1000 + offset);
+                expect(WebhookVerifier.verify(sign(ts), payload, secret, ts, { now })).toBe(true);
+            }
+        });
+
+        it('rejects a correctly signed timestamp more than 5 minutes off', () => {
+            for (const offset of [-301, 301, -3600, 86400]) {
+                const ts = String(now / 1000 + offset);
+                expect(WebhookVerifier.verify(sign(ts), payload, secret, ts, { now })).toBe(false);
+                expect(WebhookVerifier.check(sign(ts), payload, secret, ts, { now })).toEqual({
+                    valid: false, signatureValid: true, timestampValid: false,
+                });
+            }
+        });
+
+        it('rejects timestamps that are not whole Unix seconds', () => {
+            for (const ts of ['', 'abc', '1.5', '-1', `${nowSeconds}000`, ' ']) {
+                expect(WebhookVerifier.isTimestampFresh(ts, { now })).toBe(false);
+            }
+        });
+
+        it('honours a custom tolerance', () => {
+            const ts = String(now / 1000 - 30);
+            expect(WebhookVerifier.isTimestampFresh(ts, { now, toleranceSeconds: 10 })).toBe(false);
+            expect(WebhookVerifier.isTimestampFresh(ts, { now, toleranceSeconds: 60 })).toBe(true);
+        });
+    });
+
     describe('secureCompare', () => {
+        it('uses crypto.timingSafeEqual', () => {
+            const spy = jest.spyOn(crypto, 'timingSafeEqual');
+            WebhookVerifier.secureCompare('abc123', 'abc124');
+            expect(spy).toHaveBeenCalled();
+            spy.mockRestore();
+        });
+
+        it('handles multi-byte strings of the same length in characters', () => {
+            expect(WebhookVerifier.secureCompare('é', 'e')).toBe(false);
+        });
+
         it('should return true for equal strings', () => {
             expect(WebhookVerifier.secureCompare('abc123', 'abc123')).toBe(true);
         });

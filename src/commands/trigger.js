@@ -1,9 +1,10 @@
 const ApiClient = require('../lib/api-client');
 const Logger = require('../utils/logger');
 const Formatter = require('../utils/formatter');
+const { maskSecret } = require('../utils/secrets');
 
 async function triggerCommand(options) {
-  const { workflow, message, payload, webhookUrl, apiKey, apiUrl, printChannel } = options;
+  const { workflow, message, payload, webhookUrl, apiKey, apiUrl, printChannel, showSecret } = options;
 
   if (!workflow && !payload) {
     Logger.error('Error: --workflow or --payload is required');
@@ -62,8 +63,12 @@ async function triggerCommand(options) {
 
         webhookSpinner.succeed('Webhook created');
         Logger.success(`\n> Webhook ID: ${webhookResponse.id}`);
-        Logger.warning(`> Secret: ${webhookResponse.secret}`);
-        Logger.warning('> Save this secret - it won\'t be shown again!');
+        if (showSecret) {
+          Logger.warning(`> Secret: ${webhookResponse.secret}`);
+          Logger.warning('> Save this secret - it won\'t be shown again!');
+        } else {
+          Logger.warning(`> Secret: ${maskSecret(webhookResponse.secret)} (hidden; run with --show-secret to print it once)`);
+        }
         Logger.info(`\n> Response will be sent to: ${webhookUrl}`);
       } catch (error) {
         webhookSpinner.fail('Failed to create webhook');

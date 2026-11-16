@@ -1,5 +1,20 @@
 const axios = require('axios');
 const config = require('./config');
+const { checkApiUrl } = require('../utils/url-helpers');
+
+// A hosted-tools call id, as ModelRiver makes them (Signing.call_id/4).
+const TOOL_CALL_ID = /^tc_[0-9a-f]{24}$/;
+
+/**
+ * Throw unless this is a tool call id, so nothing else ends up in the URL.
+ * @param {string} callId
+ */
+function checkToolCallId(callId) {
+  if (typeof callId !== 'string' || !TOOL_CALL_ID.test(callId)) {
+    const shown = typeof callId === 'string' ? JSON.stringify(callId.slice(0, 80)) : String(callId);
+    throw new Error(`${shown} is not a tool call id (expected "tc_" followed by 24 hex characters)`);
+  }
+}
 
 function createAuthHeaders(apiKey) {
   return {
@@ -11,8 +26,6 @@ function createAuthHeaders(apiKey) {
 class ApiClient {
   constructor(apiKey = null, apiUrl = null) {
     this.apiKey = apiKey || config.getApiKey();
-    this.apiUrl = (apiUrl || config.getApiUrl()).replace(/\/$/, '');
-
     if (!this.apiKey) {
       throw new Error('API key is required. Set MODELRIVER_API_KEY env var or use --api-key flag.');
     }
@@ -21,6 +34,9 @@ class ApiClient {
     if (!this.apiKey.startsWith('mr_live_') && !this.apiKey.startsWith('mr_test_')) {
       throw new Error('Invalid API key format. API keys must start with "mr_live_" or "mr_test_".');
     }
+
+    // Throws unless the URL is https (http is allowed only for localhost).
+    this.apiUrl = checkApiUrl(apiUrl || config.getApiUrl());
 
     // Determine API path: /v1 in production (api.modelriver.com), /api/v1 in dev/test
     try {
@@ -31,12 +47,6 @@ class ApiClient {
     } catch (e) {
       // Fallback to dev path if URL parsing fails
       this.apiPath = '/api/v1';
-    }
-
-    // Debug: Log API key info if DEBUG is set
-    if (process.env.DEBUG) {
-      console.log('[DEBUG] API Key (first 30 chars):', this.apiKey ? this.apiKey.substring(0, 30) + '...' : 'NOT SET');
-      console.log('[DEBUG] Authorization header will be:', this.apiKey ? `Bearer ${this.apiKey.substring(0, 30)}...` : 'NOT SET');
     }
 
     this.client = axios.create({
@@ -139,11 +149,8 @@ class ApiClient {
     try {
       const url = `${this.apiPath}/cli/connect`;
       
-      // Debug: Log the request details
       if (process.env.DEBUG || this.verbose) {
         console.log('[DEBUG] Making request to:', `${this.apiUrl}${url}`);
-        console.log('[DEBUG] API Key (first 30 chars):', this.apiKey ? this.apiKey.substring(0, 30) + '...' : 'NOT SET');
-        console.log('[DEBUG] Authorization header:', this.apiKey ? `Bearer ${this.apiKey.substring(0, 30)}...` : 'NOT SET');
       }
 
       const response = await this.client.post(url, {});
@@ -175,14 +182,110 @@ class ApiClient {
   }
 
   /**
+   * Open a CLI tool session. Tool calls for this session are sent to the CLI
+   * over the WebSocket channel the response names.
+   * @returns {Promise<object>} - {session_id (the cts_ token), channel, expires_at, project_id}
+   */
+  async createToolSession() {
+    const url = `${this.apiPath}/cli/tool-sessions`;
+    let response;
+    try {
+      response = await this.client.post(url, {});
+    } catch (error) {
+      if (error.response) {
+        response = error.response;
+      } else if (error.request) {
+        throw new Error('Failed to open tool session: No response from server. Is the backend running?');
+      } else {
+        throw new Error(`Failed to open tool session: ${error.message}`);
+      }
+    }
+
+    if (response.status >= 400) {
+      const errorMsg = response.data?.message || response.data?.error?.message || response.data?.error || `HTTP ${response.status}`;
+      const error = new Error(`Failed to open tool session: ${typeof errorMsg === 'string' ? errorMsg : JSON.stringify(errorMsg)}`);
+      error.response = response;
+      throw error;
+    }
+
+    const data = response.data || {};
+    if (typeof data.session_id !== 'string' || !data.session_id) {
+      throw new Error('Failed to open tool session: the server did not return a session_id');
+    }
+    if (typeof data.channel !== 'string' || !data.channel.startsWith('cli_tools:')) {
+      throw new Error('Failed to open tool session: the server did not return a cli_tools channel');
+    }
+    return data;
+  }
+
+  /**
+   * Read a hosted-tools call waiting for approval: its prompt and the
+   * arguments the developer chose to show.
+   * GET /v1/ai/tool-calls/:call_id
+   * @param {string} callId - tc_…
+   * @returns {Promise<object>} - Axios response {status, data, headers}; 4xx don't throw
+   */
+  async getToolCall(callId) {
+    checkToolCallId(callId);
+    return this.client.get(`${this.apiPath}/ai/tool-calls/${encodeURIComponent(callId)}`, {
+      maxRedirects: 0,
+    });
+  }
+
+  /**
+   * Approve or decline a hosted-tools call for its end user.
+   * POST /v1/ai/tool-calls/:call_id/approve | reject
+   * @param {string} callId - tc_…
+   * @param {"approve"|"reject"} decision
+   * @param {string} endUserId - must be the request's end_user.id
+   * @returns {Promise<object>} - Axios response {status, data, headers}; 4xx don't throw
+   */
+  async decideToolCall(callId, decision, endUserId) {
+    if (decision !== 'approve' && decision !== 'reject') {
+      throw new Error(`Unknown decision "${decision}"`);
+    }
+    checkToolCallId(callId);
+    return this.client.post(
+      `${this.apiPath}/ai/tool-calls/${encodeURIComponent(callId)}/${decision}`,
+      { end_user: { id: endUserId } },
+      { maxRedirects: 0 }
+    );
+  }
+
+  /**
+   * Is this URL on the configured API host (same scheme, host and port)?
+   * @param {string} url
+   * @returns {boolean}
+   */
+  isApiOrigin(url) {
+    try {
+      return new URL(url).origin === new URL(this.apiUrl).origin;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
    * Send an event-driven callback to complete a pending channel.
    * @param {string} callbackUrl - Full callback URL from webhook payload
    * @param {object} body - Callback payload { data?, task_id?, metadata? }
    * @returns {Promise<object>} - Axios-like response { status, data }
    */
   async sendCallback(callbackUrl, body) {
+    // The API key goes only to the configured API host, never to a URL taken
+    // from a webhook payload that points somewhere else.
+    if (!this.isApiOrigin(callbackUrl)) {
+      let origin = callbackUrl;
+      try { origin = new URL(callbackUrl).origin; } catch (error) { /* keep as given */ }
+      throw new Error(
+        `Refusing to send your API key to ${origin}: callback URLs must be on the configured API host (${new URL(this.apiUrl).origin}). ` +
+        'Use --channel-id, or set --api-url to match.'
+      );
+    }
+
     const response = await axios.post(callbackUrl, body, {
       headers: createAuthHeaders(this.apiKey),
+      maxRedirects: 0,
       validateStatus: (status) => status < 500,
     });
 
@@ -191,5 +294,7 @@ class ApiClient {
 }
 
 module.exports = ApiClient;
+module.exports.TOOL_CALL_ID = TOOL_CALL_ID;
+module.exports.checkToolCallId = checkToolCallId;
 
 
